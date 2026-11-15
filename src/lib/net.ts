@@ -30,7 +30,8 @@ export function isPrivateAddress(address: string): boolean {
       (p === 198 && (q === 18 || q === 19))
     );
   }
-  if (isIP(a) === 6) return a === "::" || a === "::1" || /^(fc|fd|fe8|fe9|fea|feb|ff)/.test(a) || a.startsWith("::ffff:");
+  // IPv6: unspecified, loopback and the old IPv4-compatible block (::/96), NAT64, unique-local, link-local, site-local, multicast.
+  if (isIP(a) === 6) return a.startsWith("::") || /^(64:ff9b:|fc|fd|fe[89a-f]|ff)/.test(a);
   return true; // not an address at all
 }
 
@@ -50,23 +51,60 @@ export async function assertPublicUrl(url: URL): Promise<void> {
 
 /**
  * fetch with every hop checked: the first address and each redirect must be
- * public, and the request is abandoned after 30 seconds. The check and the
+ * public, credentials are dropped when a redirect changes host, and a hung
+ * request is abandoned. The check and the
  * connection resolve the name separately, so a hostile DNS server could still
  * answer differently the second time; this narrows that window, it does not
  * close it.
  */
+/** Headers that prove who we are to one host and must not follow a redirect to another. */
+const CREDENTIAL_HEADERS = ["authorization", "cookie", "api-key", "x-api-key", "proxy-authorization"];
+
 export function guardedFetch(inner: typeof fetch = fetch): typeof fetch {
   return (async (input: RequestInfo | URL, init: RequestInit = {}) => {
     let current = new URL(input instanceof Request ? input.url : String(input));
+    // Ten minutes bounds a hung connection without cutting off a large video in mid-transfer.
+    const signal = init.signal ?? AbortSignal.timeout(600_000);
     for (let hop = 0; hop < 5; hop++) {
       await assertPublicUrl(current);
-      const response = await inner(current, { ...init, redirect: "manual", signal: init.signal ?? AbortSignal.timeout(30_000) });
+      const response = await inner(current, { ...init, redirect: "manual", signal });
       const location = response.status >= 300 && response.status < 400 ? response.headers.get("location") : null;
       if (!location) return response;
-      current = new URL(location, current);
-      // A redirect becomes a plain GET, as browsers do, so a body is never replayed to a new host.
-      init = { ...init, method: "GET", body: undefined };
+      const next = new URL(location, current);
+      if (next.origin !== current.origin) {
+        const headers = new Headers(init.headers);
+        for (const name of CREDENTIAL_HEADERS) headers.delete(name);
+        init = { ...init, headers };
+      }
+      // 307 and 308 repeat the request as it was; the older codes become a plain GET, as browsers do.
+      if (response.status !== 307 && response.status !== 308) init = { ...init, method: "GET", body: undefined };
+      current = next;
     }
     throw new BlockedAddress("The address redirected too many times.");
   }) as typeof fetch;
+}
+
+/** Reads a response body, stopping with an error as soon as it passes `max` bytes, so an unbounded download cannot fill memory. */
+export async function readCapped(response: Response, max: number): Promise<Uint8Array> {
+  if (!response.body) return new Uint8Array(await response.arrayBuffer());
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.length;
+    if (total > max) {
+      await reader.cancel();
+      throw new BlockedAddress(`That file is larger than the ${Math.round(max / 1024 / 1024)} MB limit.`);
+    }
+    chunks.push(value);
+  }
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return out;
 }

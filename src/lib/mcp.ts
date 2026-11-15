@@ -273,7 +273,8 @@ export function buildServer({ baseUrl, local }: Options): McpServer {
       annotations: { openWorldHint: true },
     },
     guard(async ({ post_id, ...patch }: { post_id: string; content?: string; targets?: z.infer<typeof targetShape>[]; media_ids?: string[]; publish_at?: string | null; draft?: boolean }) =>
-      withLink(await updatePost(post_id, patch)),
+      // Drafts-only mode holds here too: an agent may edit a post, and it stays a draft whatever it asks for.
+      withLink(await updatePost(post_id, draftsOnly ? { ...patch, draft: true, publish_at: undefined } : patch)),
     ),
   );
 

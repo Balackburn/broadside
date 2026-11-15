@@ -117,7 +117,7 @@ Broadside holds the keys to your social accounts, so this is how it protects the
 
 Without a password it is a local tool. It listens on `127.0.0.1`, and it only answers requests addressed to `localhost`, which stops a web page from reaching it by pointing its own domain at your machine. Any program already running as you on the same machine can still use it; that is the same trust you give the data folder.
 
-With a password, the web app needs a signed session cookie that expires after 30 days. Wrong passwords are throttled. API and MCP callers always need a key; keys are 192 bits, stored hashed and shown once.
+With a password, the web app needs a signed session cookie that expires after 30 days. Wrong passwords are slowed down rather than locked out, so guessing is expensive and you can always get in with the right one. Sign out clears the session in that browser; to end every session at once, change the password. API and MCP callers always need a key; keys are 192 bits, stored hashed and shown once.
 
 Credentials are encrypted with AES-256-GCM and never returned by any API. The data folder is created readable by its owner only.
 
@@ -132,6 +132,7 @@ Known limits:
 - API keys have no scopes and do not expire. Revoke one under Connect when you stop using it.
 - The private-address check resolves a name before connecting to it, so a hostile DNS server that changes its answer between the two could still get through. It narrows that hole and does not close it.
 - A few networks (Threads, Instagram, Facebook) take the access token in the URL, as their APIs require.
+- An upload is held in memory while it is checked, so the size limit is also a memory limit.
 - There is no audit log yet beyond the post history.
 
 To put Broadside on the internet, keep it on `127.0.0.1` and publish it through a tunnel with an access layer in front (Cloudflare Tunnel with an Access application, for example), allowing `/media/*` through so networks can fetch your media, and keep `BROADSIDE_PASSWORD` set as well. This layout is the recommendation from a security review of the code; the exact tunnel settings were not tested here.

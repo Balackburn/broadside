@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { schnorr } from "@noble/curves/secp256k1.js";
 import { bech32 } from "@scure/base";
+import { assertPublicUrl } from "../net";
 import { call, images, json, videos, PublishError, type Connector, type Context, type Credentials } from "./types";
 
 /** The first line of a post doubles as its title on networks that want one. */
@@ -295,7 +296,13 @@ export const nostr: Connector = {
   async publish(input, c) {
     const content = [input.text, ...input.media.map((m) => m.publicUrl)].filter(Boolean).join("\n");
     const event = nostrEvent(nostrSecret(c.private_key), content);
-    const results = await Promise.allSettled(relays(c).map((url) => sendToRelay(url, event)));
+    // A relay address is user-typed like any other, so it gets the same private-network check before a socket is opened.
+    const results = await Promise.allSettled(
+      relays(c).map(async (url) => {
+        await assertPublicUrl(new URL(url.replace(/^ws/, "http")));
+        return sendToRelay(url, event);
+      }),
+    );
     if (!results.some((r) => r.status === "fulfilled")) {
       const reasons = results.map((r, i) => `${relays(c)[i]}: ${(r as PromiseRejectedResult).reason.message}`).join("; ");
       throw new PublishError(`No relay accepted the note (${reasons}).`, true);

@@ -9,6 +9,6 @@ export const metadata: Metadata = { title: "Connect" };
 
 export default async function ConnectPage() {
   const h = await headers();
-  const base = publicBase() ?? `${h.get("x-forwarded-proto") ?? "http"}://${h.get("x-forwarded-host") ?? h.get("host") ?? "localhost:3000"}`;
+  const base = publicBase() ?? `http://${h.get("host") ?? "localhost:3000"}`;
   return <KeysPanel keys={listKeys()} base={base} cwd={process.cwd()} />;
 }

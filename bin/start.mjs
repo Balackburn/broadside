@@ -19,7 +19,7 @@ if (!loopback && !process.env.BROADSIDE_PASSWORD) {
 }
 
 const extra = process.argv.slice(2);
-if (extra.includes("-H") || extra.includes("--hostname")) {
+if (extra.some((arg) => /^(-H|--hostname)(=|$)/.test(arg) || /^-H./.test(arg))) {
   console.error("Set BROADSIDE_HOST instead of passing -H, so the password check above applies.");
   process.exit(1);
 }

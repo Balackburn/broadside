@@ -1,25 +1,25 @@
 import { passwordMatches, passwordRequired, SESSION_COOKIE, SESSION_SECONDS, sessionValue } from "@/lib/session";
 
 /**
- * Wrong guesses are counted per address and overall. Past the limit the route
- * answers 429 without checking the password, so a guesser gains nothing by
- * continuing, and a slow distributed attempt still runs into the overall cap.
+ * Guessing is slowed, never locked. After a few wrong passwords in five
+ * minutes every attempt waits before it is checked, the wait doubling up to a
+ * ceiling, and attempts are handled one at a time so a flood cannot run in
+ * parallel. The right password always works; under attack it just takes a few
+ * seconds. Nothing here depends on the caller's address, which a client can
+ * fake, so there is no per-address rule to dodge and no one to lock out.
  */
 const WINDOW_MS = 5 * 60_000;
-const PER_ADDRESS = 8;
-const OVERALL = 60;
-type Tally = { count: number; resets: number };
-const failures = new Map<string, Tally>();
+const FREE_ATTEMPTS = 5;
+const BASE_DELAY_MS = Number(process.env.BROADSIDE_LOGIN_DELAY_MS ?? 500);
+const MAX_WAITING = 30;
 
-function tally(key: string, now: number): Tally {
-  const found = failures.get(key);
-  if (found && found.resets > now) return found;
-  const fresh = { count: 0, resets: now + WINDOW_MS };
-  failures.set(key, fresh);
-  return fresh;
-}
+let failures: number[] = [];
+let queue: Promise<unknown> = Promise.resolve();
+let waiting = 0;
 
-/** Signing out clears the cookie in this browser. */
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Signing out clears the cookie in this browser. To end every session at once, change the password. */
 export async function DELETE() {
   return Response.json({ data: { signed_in: false } }, { headers: { "set-cookie": `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0` } });
 }
@@ -32,24 +32,25 @@ export async function POST(request: Request) {
   const { password } = (await request.json().catch(() => ({}))) as { password?: string };
   if (!passwordRequired()) return Response.json({ data: { signed_in: true } });
 
-  const now = Date.now();
-  const address = (request.headers.get("x-forwarded-for") ?? "").split(",")[0].trim() || "direct";
-  const mine = tally(`a:${address}`, now);
-  const everyone = tally("all", now);
-  if (mine.count >= PER_ADDRESS || everyone.count >= OVERALL) {
-    const wait = Math.ceil((Math.max(mine.resets, everyone.resets) - now) / 1000);
-    return Response.json(
-      { error: { code: "too_many_attempts", message: `Too many wrong passwords. Try again in ${Math.ceil(wait / 60)} minutes.` } },
-      { status: 429, headers: { "retry-after": String(wait) } },
-    );
+  if (waiting >= MAX_WAITING) {
+    return Response.json({ error: { code: "busy", message: "Too many sign-in attempts are waiting. Try again in a moment." } }, { status: 429, headers: { "retry-after": "10" } });
   }
+  waiting++;
+  const turn = queue.then(async () => {
+    const now = Date.now();
+    failures = failures.filter((at) => at > now - WINDOW_MS);
+    const over = failures.length - FREE_ATTEMPTS;
+    if (over >= 0) await sleep(Math.min(BASE_DELAY_MS * 2 ** over, BASE_DELAY_MS * 8));
+    const right = Boolean(password) && (await passwordMatches(password!));
+    if (!right) failures.push(Date.now());
+    return right;
+  });
+  queue = turn.catch(() => undefined);
+  const right = await turn.finally(() => waiting--);
 
-  if (!password || !(await passwordMatches(password))) {
-    mine.count++;
-    everyone.count++;
+  if (!right) {
     return Response.json({ error: { code: "wrong_password", message: "That is not the password for this Broadside." } }, { status: 401 });
   }
-  failures.delete(`a:${address}`);
   const secure = new URL(request.url).protocol === "https:" || request.headers.get("x-forwarded-proto") === "https";
   return Response.json(
     { data: { signed_in: true } },

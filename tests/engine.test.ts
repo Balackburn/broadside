@@ -144,7 +144,7 @@ describe("importing media by URL", () => {
   });
 
   it("knows which addresses are not on the public internet", () => {
-    for (const a of ["127.0.0.1", "10.1.2.3", "172.16.0.1", "192.168.1.11", "169.254.169.254", "100.64.0.1", "0.0.0.0", "::1", "::", "[::1]", "::ffff:127.0.0.1", "fd00::1", "fe80::1", "not-an-ip"]) {
+    for (const a of ["127.0.0.1", "10.1.2.3", "172.16.0.1", "192.168.1.11", "169.254.169.254", "100.64.0.1", "0.0.0.0", "::1", "::", "[::1]", "::ffff:127.0.0.1", "::7f00:1", "64:ff9b::7f00:1", "fec0::1", "fd00::1", "fe80::1", "ff02::1", "not-an-ip"]) {
       expect(isPrivateAddress(a), a).toBe(true);
     }
     for (const a of ["93.184.216.34", "8.8.8.8", "172.32.0.1", "2606:4700:4700::1111"]) expect(isPrivateAddress(a), a).toBe(false);
@@ -153,6 +153,30 @@ describe("importing media by URL", () => {
   it("refuses an IPv6 loopback literal instead of crashing on it", async () => {
     await expect(importMedia("http://[::1]/x.png", undefined, (async () => png()) as typeof fetch)).rejects.toThrow(/private network/);
     await expect(importMedia("http://[::ffff:127.0.0.1]/x.png", undefined, (async () => png()) as typeof fetch)).rejects.toThrow(/private network/);
+  });
+
+  it("drops credentials when a redirect changes host, and repeats a 307 as it was", async () => {
+    const seen: { url: string; method: string; auth: string | null; body: unknown }[] = [];
+    const hopping = (async (input: RequestInfo | URL, init: RequestInit = {}) => {
+      const url = String(input);
+      seen.push({ url, method: init.method ?? "GET", auth: new Headers(init.headers).get("authorization"), body: init.body ?? null });
+      if (url === "http://93.184.216.34/start") return new Response(null, { status: 307, headers: { location: "http://93.184.216.34/same-host" } });
+      if (url === "http://93.184.216.34/same-host") return new Response(null, { status: 302, headers: { location: "http://8.8.8.8/other-host" } });
+      return Response.json({ ok: true });
+    }) as typeof fetch;
+    await guardedFetch(hopping)("http://93.184.216.34/start", { method: "POST", headers: { authorization: "Bearer secret" }, body: "payload" });
+    expect(seen).toEqual([
+      { url: "http://93.184.216.34/start", method: "POST", auth: "Bearer secret", body: "payload" },
+      { url: "http://93.184.216.34/same-host", method: "POST", auth: "Bearer secret", body: "payload" },
+      { url: "http://8.8.8.8/other-host", method: "GET", auth: null, body: null },
+    ]);
+  });
+
+  it("stops a download that has no declared size once it passes the limit", async () => {
+    const { readCapped } = await import("@/lib/net");
+    const endless = new Response(new ReadableStream({ pull: (controller) => controller.enqueue(new Uint8Array(1024)) }));
+    await expect(readCapped(endless, 4096)).rejects.toThrow(/larger than/);
+    expect((await readCapped(new Response(new Uint8Array(100)), 4096)).length).toBe(100);
   });
 
   it("guards connector requests the same way, and lets public ones through", async () => {
@@ -241,6 +265,9 @@ describe("who may use the app without a key", () => {
     expect(await signedIn(withCookie(value), Date.now() + 31 * 24 * 3600 * 1000)).toBe(false);
     const [expires, signature] = value.split(".");
     expect(await signedIn(withCookie(`${Number(expires) + 999}.${signature}`))).toBe(false);
+    // Even a correctly signed cookie is refused if it is dated further ahead than this server issues.
+    const farFuture = await sessionValue(Date.now() + 400 * 24 * 3600 * 1000);
+    expect(await signedIn(withCookie(farFuture))).toBe(false);
     expect(await signedIn(withCookie("anything"))).toBe(false);
     process.env.BROADSIDE_PASSWORD = "changed";
     expect(await signedIn(withCookie(value))).toBe(false);

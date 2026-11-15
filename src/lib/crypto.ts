@@ -8,12 +8,18 @@ import { dataDir } from "./db";
  * BROADSIDE_SECRET, or from a key file created on first run beside the
  * database (mode 0600). Losing the key means reconnecting accounts.
  */
+/** The install's own secret: read from the key file beside the database, created on first use. */
+export function installSecret(): string {
+  const file = path.join(dataDir(), "secret.key");
+  if (!existsSync(file)) writeFileSync(file, randomBytes(32).toString("hex"), { mode: 0o600 });
+  return readFileSync(file, "utf8").trim();
+}
+
+/** The key that seals credentials: BROADSIDE_SECRET if the operator set one, else the install's key file. Unchanged since the first release, so existing data keeps opening. */
 function key(): Buffer {
   const fromEnv = process.env.BROADSIDE_SECRET;
   if (fromEnv) return createHash("sha256").update(fromEnv).digest();
-  const file = path.join(dataDir(), "secret.key");
-  if (!existsSync(file)) writeFileSync(file, randomBytes(32).toString("hex"), { mode: 0o600 });
-  return Buffer.from(readFileSync(file, "utf8").trim(), "hex");
+  return Buffer.from(installSecret(), "hex");
 }
 
 export function seal(value: unknown): string {

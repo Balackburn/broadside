@@ -299,6 +299,14 @@ try {
   const wrongKind = await local.callTool({ name: "upload_media", arguments: { path: "/etc/hosts", content_type: "image/png" } });
   ok(dressed.isError && /is not a JPEG/.test(dressed.content[0].text) && wrongKind.isError && /can be uploaded from disk/.test(wrongKind.content[0].text), "The stdio server will not read a non-media file, whatever type the caller claims");
   await local.close();
+  const careful = new Client({ name: "verify-drafts-only", version: "1.0.0" });
+  await careful.connect(new StdioClientTransport({ command: "npx", args: ["tsx", "bin/broadside-mcp.ts"], cwd: root, env: { ...env, BROADSIDE_PUBLIC_URL: base, BROADSIDE_MCP_DRAFTS_ONLY: "1" } }));
+  const held = result(await careful.callTool({ name: "create_post", arguments: { content: "an agent's idea", targets: [{ account_id: ids.sandbox }] } }));
+  const pushed = result(await careful.callTool({ name: "update_post", arguments: { post_id: held.id, draft: false } }));
+  const timed = result(await careful.callTool({ name: "update_post", arguments: { post_id: held.id, draft: false, publish_at: new Date(Date.now() + 60000).toISOString() } }));
+  const forced = await careful.callTool({ name: "publish_post", arguments: { post_id: held.id } });
+  ok(held.status === "draft" && pushed.status === "draft" && timed.status === "draft" && forced.isError, "In drafts-only mode an agent cannot publish or schedule by any tool");
+  await careful.close();
 
   // REST parity and the web pages
   const rest = await api("/api/v1/posts", { method: "POST", headers: { ...auth, "idempotency-key": "rest-1" }, body: JSON.stringify({ content: "from REST", targets: [{ account_id: ids.sandbox }] }) });
@@ -361,7 +369,7 @@ try {
   app.kill("SIGTERM");
   const lockedPort = port + 1;
   const locked = `http://127.0.0.1:${lockedPort}`;
-  app = spawn("npx", ["next", "start", "-p", String(lockedPort), "-H", "127.0.0.1"], { cwd: root, env: { ...env, BROADSIDE_PASSWORD: "correct horse" }, stdio: "ignore" });
+  app = spawn("npx", ["next", "start", "-p", String(lockedPort), "-H", "127.0.0.1"], { cwd: root, env: { ...env, BROADSIDE_PASSWORD: "correct horse", BROADSIDE_LOGIN_DELAY_MS: "20" }, stdio: "ignore" });
   await until(async () => (await fetch(`${locked}/api/health`)).ok, "the password-protected server", 60000);
   const gate = await fetch(`${locked}/app`, { redirect: "manual" });
   ok(gate.status === 307 && gate.headers.get("location").includes("/login"), "With a password set, the app sends visitors to sign in");
@@ -378,13 +386,14 @@ try {
   ok(signedInPage.includes("Sign out") && /Max-Age=0/.test(out.headers.get("set-cookie") ?? ""), "A signed-in page offers Sign out, and signing out clears the session cookie");
   ok((await fetch(`${locked}/app`, { headers: { cookie }, redirect: "manual" })).status === 200 && (await fetch(`${locked}/api/v1/accounts`, { headers: { ...ui, cookie } })).status === 200, "A signed-in session reaches the app and its API");
   ok((await fetch(`${locked}/api/v1/accounts`, { headers: auth })).status === 200, "API keys keep working when a password is set");
-  let throttled = 0;
+  const began = Date.now();
+  let wrongGuesses = 0;
   for (let i = 0; i < 12; i++) {
-    const guess = await fetch(`${locked}/api/login`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ password: `guess-${i}` }) });
-    if (guess.status === 429) throttled++;
+    const guess = await fetch(`${locked}/api/login`, { method: "POST", headers: { "content-type": "application/json", "x-forwarded-for": `10.0.0.${i}` }, body: JSON.stringify({ password: `guess-${i}` }) });
+    if (guess.status === 401) wrongGuesses++;
   }
   const after = await fetch(`${locked}/api/login`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ password: "correct horse" }) });
-  ok(throttled >= 3 && after.status === 429 && after.headers.get("retry-after"), "Repeated wrong passwords are throttled, and the lock holds even for the right one");
+  ok(wrongGuesses === 12 && after.status === 200 && Date.now() - began > 900, "Wrong passwords are slowed however the caller labels itself, and the right password still gets in");
 } catch (error) {
   failed = true;
   console.error(`\nverify: FAIL after ${checks} passing checks — ${error.message}`);

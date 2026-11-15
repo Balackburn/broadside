@@ -14,7 +14,7 @@ const hex = (bytes: ArrayBuffer) => [...new Uint8Array(bytes)].map((b) => b.toSt
 
 async function sign(message: string): Promise<string> {
   // Keyed by the password and the server secret together, so a leaked cookie is no shortcut to the password.
-  const material = encoder.encode(`${process.env.BROADSIDE_PASSWORD}\u0000${process.env.BROADSIDE_SECRET ?? ""}`);
+  const material = encoder.encode(`${process.env.BROADSIDE_PASSWORD}\u0000${process.env.BROADSIDE_SECRET ?? process.env.BROADSIDE_SESSION_SECRET ?? ""}`);
   const key = await crypto.subtle.importKey("raw", await crypto.subtle.digest("SHA-256", material), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
   return hex(await crypto.subtle.sign("HMAC", key, encoder.encode(message)));
 }
@@ -41,6 +41,9 @@ export async function signedIn(request: Request, now = Date.now()): Promise<bool
   const cookies = request.headers.get("cookie") ?? "";
   const value = cookies.split(/;\s*/).find((c) => c.startsWith(`${SESSION_COOKIE}=`))?.slice(SESSION_COOKIE.length + 1) ?? "";
   const [expires, signature] = value.split(".");
-  if (!expires || !signature || !/^\d+$/.test(expires) || Number(expires) * 1000 < now) return false;
+  if (!expires || !signature || !/^\d+$/.test(expires)) return false;
+  const until = Number(expires) * 1000;
+  // Expired, or dated further ahead than this server ever issues: either way it is not one of ours to honour.
+  if (until < now || until > now + (SESSION_SECONDS + 300) * 1000) return false;
   return same(signature, await sign(`session:${expires}`));
 }

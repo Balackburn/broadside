@@ -4,7 +4,7 @@ import path from "node:path";
 import { InputError } from "./accounts";
 import { newId } from "./crypto";
 import { all, dataDir, get, now, run } from "./db";
-import { BlockedAddress, guardedFetch } from "./net";
+import { BlockedAddress, guardedFetch, readCapped } from "./net";
 import type { MediaItem } from "./platforms/types";
 
 export type Media = {
@@ -104,7 +104,9 @@ export async function importMedia(sourceUrl: string, alt?: string, fetcher: type
   });
   if (!response.ok) throw new InputError(`Could not download the media: ${url.host} answered ${response.status}.`);
   if (Number(response.headers.get("content-length") ?? 0) > MAX_BYTES) throw new InputError(`That file is larger than the ${MAX_BYTES / 1024 / 1024} MB limit.`);
-  const bytes = new Uint8Array(await response.arrayBuffer());
+  const bytes = await readCapped(response, MAX_BYTES).catch((cause: Error) => {
+    throw new InputError(cause.message);
+  });
   const name = path.basename(url.pathname) || "media";
   return saveMedia(bytes, name, response.headers.get("content-type") ?? "", { alt, sourceUrl });
 }
