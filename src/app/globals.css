@@ -765,6 +765,19 @@
     }
   }
 
+  /* The phone's More sheet: the screens that do not fit on the bar, rising out of it. */
+  .more-sheet {
+    box-shadow: var(--float-shadow);
+    transform-origin: bottom center;
+    transition:
+      opacity var(--duration-fast) var(--ease-smooth-out),
+      transform var(--duration-fast) var(--ease-smooth-out);
+    @starting-style {
+      opacity: 0;
+      transform: translateY(8px) scale(0.98);
+    }
+  }
+
   .row {
     transition:
       background-color var(--duration-quick) ease,

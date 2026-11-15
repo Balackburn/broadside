@@ -19,6 +19,8 @@ type Post = {
   publish_at: string | null;
   created_at: string;
   origin: string;
+  feed: { id: string; title: string | null } | null;
+  held_reason: string | null;
   repeat: { every: "day" | "week" | "month"; until: string | null } | null;
   series: { id: string; active: boolean } | null;
   targets: Target[];
@@ -35,13 +37,16 @@ const FILTERS: { value: Filter; label: string }[] = [
   { value: "draft", label: "Drafts" },
 ];
 
-const ORIGIN: Record<string, string> = { ui: "From the app", mcp: "From an agent", api: "From the API" };
+const ORIGIN: Record<string, string> = { ui: "From the app", mcp: "From an agent", api: "From the API", feed: "From a feed" };
 
 const matches = (post: Post, filter: Filter) =>
   filter === "all" || (filter === "failed" ? post.status === "failed" || post.status === "partial" : filter === "scheduled" ? post.status === "scheduled" || post.status === "publishing" : post.status === filter);
 
-/** `numbers` holds what Broadside has read back for each published target, by target id. A target that has not gone out has no entry. */
-export function PostsList({ posts, tags, numbers = {}, focus }: { posts: Post[]; tags: TagInfo[]; numbers?: Record<string, TargetNumbers>; focus?: string }) {
+/**
+ * `numbers` holds what Broadside has read back for each published target, by target id. A target that has not gone out has no entry.
+ * `feed` is set when the list was asked for one feed's posts only; its title is another site's text and is shown as text.
+ */
+export function PostsList({ posts, tags, numbers = {}, focus, feed }: { posts: Post[]; tags: TagInfo[]; numbers?: Record<string, TargetNumbers>; focus?: string; feed?: { id: string; title: string | null } }) {
   const router = useRouter();
   const { show, toast } = useToast();
   const [filter, setFilter] = useState<Filter>("all");
@@ -111,11 +116,22 @@ export function PostsList({ posts, tags, numbers = {}, focus }: { posts: Post[];
         </div>
       ) : null}
 
+      {feed ? (
+        <p className="note mt-4">
+          {"Posts made from the feed "}
+          <span className="font-medium text-ink">{feed.title ?? "that was deleted"}</span>
+          {". "}
+          <Link className="link py-1" href="/app/posts">
+            Show all posts
+          </Link>
+        </p>
+      ) : null}
+
       {shown.length === 0 ? (
         <div className="panel mt-8 p-10 text-center">
-          <p className="title text-xl">{posts.length === 0 ? "Nothing posted yet." : "No posts here."}</p>
-          <p className="note mt-2">{posts.length === 0 ? "Posts you send from the app, an agent or the API all land in this list." : "Try another filter."}</p>
-          {posts.length === 0 ? (
+          <p className="title text-xl">{posts.length === 0 ? (feed ? "This feed has made no posts yet." : "Nothing posted yet.") : "No posts here."}</p>
+          <p className="note mt-2">{posts.length === 0 ? (feed ? "When a new item appears in the feed, the post made from it lands here." : "Posts you send from the app, an agent or the API all land in this list.") : "Try another filter."}</p>
+          {posts.length === 0 && !feed ? (
             <Link className="btn mt-6" href="/app">
               Write a post
             </Link>
@@ -137,6 +153,7 @@ export function PostsList({ posts, tags, numbers = {}, focus }: { posts: Post[];
                         <Time iso={post.publish_at ?? post.created_at} />
                       </span>
                       <span>{ORIGIN[post.origin] ?? post.origin}</span>
+                      {post.held_reason ? <span className="text-bad">Does not fit yet</span> : null}
                       {post.media.length ? <span>{post.media.length} media</span> : null}
                       {post.thread.length ? <span>{`Thread of ${post.thread.length + 1}`}</span> : null}
                       {post.repeat ? <span>{`Repeats every ${post.repeat.every}`}</span> : null}
@@ -156,6 +173,20 @@ export function PostsList({ posts, tags, numbers = {}, focus }: { posts: Post[];
                 </button>
                 {expanded ? (
                   <div className="bg-paper-2 p-4">
+                    {post.feed ? (
+                      <p className="note mb-3">
+                        {"Made from an item in the feed "}
+                        <Link className="link py-1" href={`/app/posts?feed=${post.feed.id}`}>
+                          {post.feed.title ?? "that was deleted"}
+                        </Link>
+                        {". The words are the feed's, so read them before they go out."}
+                      </p>
+                    ) : null}
+                    {post.held_reason ? (
+                      <p className="mb-3 text-sm text-bad" role="status">
+                        {`Held as a draft because it does not fit. ${post.held_reason} Shorten it or change its accounts, then publish.`}
+                      </p>
+                    ) : null}
                     {post.thread.length ? (
                       <ol className="mb-3 space-y-2">
                         {post.thread.map((text, i) => (

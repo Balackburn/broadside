@@ -24,6 +24,8 @@ const TOOLS: [string, string][] = [
   ["publish_post", "Send a draft or scheduled post now"],
   ["cancel_post", "Stop a scheduled post"],
   ["retry_target", "Resend to one network that failed"],
+  ["list_feeds", "The feeds Broadside reads, to look at only"],
+  ["list_outgoing_webhooks", "The outgoing webhooks, to look at only"],
 ];
 
 export function KeysPanel({ keys, base, cwd }: { keys: Key[]; base: string; cwd: string }) {

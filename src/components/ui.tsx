@@ -59,6 +59,9 @@ const paths: Record<string, ReactNode> = {
   chart: <path d="M4 20h16M7 20v-7M12 20V5M17 20v-10" />,
   down: <path d="M12 5v14M6 13l6 6 6-6" />,
   up: <path d="M12 19V5M6 11l6-6 6 6" />,
+  bolt: <path d="M13 3 5 13.5h6L10 21l9-10.5h-6L13 3Z" />,
+  feed: <path d="M5 19h.01M5 12a7 7 0 0 1 7 7M5 5a14 14 0 0 1 14 14" />,
+  more: <path d="M4.5 12a1 1 0 1 0 2 0 1 1 0 0 0-2 0ZM11 12a1 1 0 1 0 2 0 1 1 0 0 0-2 0ZM17.5 12a1 1 0 1 0 2 0 1 1 0 0 0-2 0Z" />,
 };
 
 export function Icon({ name, size = 18 }: { name: keyof typeof paths | string; size?: number }) {
