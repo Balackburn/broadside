@@ -6,7 +6,7 @@
  * Exits non-zero on the first thing that is not true.
  */
 import { spawn, spawnSync } from "node:child_process";
-import { createHmac, randomBytes } from "node:crypto";
+import { createHash, createHmac, randomBytes } from "node:crypto";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
@@ -65,6 +65,187 @@ const receiver = { mode: "ok", requests: [], elsewhere: [], held: [] };
 // Image generation: a made-up key, different every run and never printed, and every request the stand-in for OpenAI was sent.
 const IMAGE_KEY = `sk-verify-standin-${randomBytes(24).toString("hex")}`;
 const imageRequests = [];
+// The six destinations added after the first eighteen. The three sites are served under a path each, as a site of your own would be;
+// Tumblr, Twitch and Kick live at fixed addresses and reach the stand-in through scripts/standin-fetch.mjs.
+const SITE = {
+  wordpress: { username: "verify-author", application_password: "vrfy WPap 91c4 e07b d2aa 6f35" },
+  ghost: { id: "64f0c2a1b7d3e9verify", secret: randomBytes(32).toString("hex") },
+  listmonk: { api_user: "verify-bot", api_token: `verify-lm-token-${randomBytes(8).toString("hex")}` },
+};
+const GHOST_KEY = `${SITE.ghost.id}:${SITE.ghost.secret}`;
+const more = {
+  wordpress: { media: [], posts: [] },
+  ghost: { images: [], posts: [], tokens: [] },
+  listmonk: { media: [], campaigns: [], started: [], reads: [] },
+  tumblr: { posts: [] },
+  twitch: { messages: [], lookups: [] },
+  kick: { messages: [] },
+  tokenRequests: [],
+  queriesOnTokenEndpoints: [],
+};
+// Refresh tokens that work once and access tokens that last a minute, so Broadside must renew before every call and store what it is given.
+const renewing = Object.fromEntries(["tumblr", "twitch", "kick"].map((name) => [name, { n: 0, access: null, refresh: null, spent: [], issued: new Set(), verifiers: [] }]));
+/** True when this is a token Ghost would accept: signed with the key's secret as bytes, naming the key, for /admin/, and good for no more than five minutes. */
+function ghostTokenOk(authorization) {
+  const [scheme, token = ""] = authorization.split(" ");
+  const [header, payload, signature] = token.split(".");
+  const entry = { valid: false, lifetime: null };
+  more.ghost.tokens.push(entry);
+  try {
+    const head = JSON.parse(Buffer.from(header, "base64url").toString("utf8"));
+    const claims = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+    const expected = createHmac("sha256", Buffer.from(SITE.ghost.secret, "hex")).update(`${header}.${payload}`).digest("base64url");
+    const now = Date.now() / 1000;
+    entry.lifetime = claims.exp - claims.iat;
+    entry.valid = scheme === "Ghost" && head.alg === "HS256" && head.typ === "JWT" && head.kid === SITE.ghost.id && claims.aud === "/admin/" && entry.lifetime > 0 && entry.lifetime <= 300 && claims.exp > now && claims.iat <= now + 5 && signature === expected;
+  } catch {
+    /* not a token at all */
+  }
+  return entry.valid;
+}
+/** The file and the plain fields of a multipart form, read from its text: enough to see which field carried the file and what travelled beside it. */
+function formParts(text) {
+  const file = text.match(/name="([^"]+)"; filename="([^"]*)"\r\nContent-Type: ([^\r]+)/);
+  const fields = Object.fromEntries([...text.matchAll(/name="([^"]+)"\r\n\r\n([\s\S]*?)\r\n--/g)].map((m) => [m[1], m[2]]));
+  return { file: file ? { field: file[1], filename: file[2], type: file[3] } : null, fields };
+}
+
+function moreDestinations(req, url, text, parsed) {
+  const { pathname, search, searchParams } = new URL(url, "http://standin");
+  const auth = req.headers.authorization ?? "";
+  const multipart = (req.headers["content-type"] ?? "").startsWith("multipart/form-data");
+  const here = `http://${req.headers.host}`;
+
+  // WordPress: Basic auth with an application password, a media upload as a form, and a post as JSON.
+  if (pathname.startsWith("/wp/wp-json/wp/v2/")) {
+    const expected = `Basic ${Buffer.from(`${SITE.wordpress.username}:${SITE.wordpress.application_password}`).toString("base64")}`;
+    if (auth !== expected) return { status: 401, body: { code: "incorrect_password", message: "The provided password is an invalid application password.", data: { status: 401 } } };
+    if (req.method === "GET" && pathname.endsWith("/users/me")) return { body: { id: 1, name: "Verify Author", slug: "verify-author", avatar_urls: {} } };
+    if (req.method === "POST" && pathname.endsWith("/media")) {
+      const id = 500 + more.wordpress.media.length;
+      more.wordpress.media.push({ id, multipart, ...formParts(text) });
+      return { status: 201, body: { id, source_url: `${here}/wp/wp-content/uploads/pixel-${id}.png`, media_type: "image" } };
+    }
+    if (req.method === "POST" && pathname.endsWith("/posts")) {
+      const post = parsed();
+      if (String(post.title).includes("[refuse]")) return { status: 403, body: { code: "rest_cannot_create", message: "Sorry, you are not allowed to create posts as this user.", data: { status: 403 } } };
+      const id = 300 + more.wordpress.posts.length;
+      more.wordpress.posts.push({ id, contentType: req.headers["content-type"], ...post });
+      return { status: 201, body: { id, link: `https://blog.example/?p=${id}`, status: post.status } };
+    }
+  }
+  // Ghost: every call but /site/ carries a token made from the Admin API key.
+  if (pathname.startsWith("/journal/ghost/api/admin/")) {
+    if (req.method === "GET" && pathname.endsWith("/site/")) return { body: { site: { title: "Verify Journal by Ghost", description: "", logo: null, url: "https://journal.example/", version: "6.2" } } };
+    if (!ghostTokenOk(auth)) return { status: 401, body: { errors: [{ message: "Unknown Admin API Key", errorType: "UnauthorizedError" }] } };
+    if (req.method === "GET" && pathname.endsWith("/posts/")) return { body: { posts: [], meta: { pagination: { page: 1, limit: 1, pages: 0, total: 0, next: null, prev: null } } } };
+    if (req.method === "POST" && pathname.endsWith("/images/upload/")) {
+      const n = more.ghost.images.length + 1;
+      more.ghost.images.push({ multipart, version: req.headers["accept-version"], ...formParts(text) });
+      return { status: 201, body: { images: [{ url: `https://journal.example/content/images/pixel-${n}.png`, ref: formParts(text).fields.ref ?? null }] } };
+    }
+    if (req.method === "POST" && pathname.endsWith("/posts/")) {
+      const post = parsed().posts?.[0] ?? {};
+      const id = `6540f0c2a1b7d3e9f000${String(more.ghost.posts.length).padStart(4, "0")}`;
+      more.ghost.posts.push({ id, source: searchParams.get("source"), version: req.headers["accept-version"], ...post });
+      return { status: 201, body: { posts: [{ id, title: post.title, status: post.status, url: post.status === "draft" ? `https://journal.example/p/${id}/` : `https://journal.example/${id}/` }] } };
+    }
+  }
+  // Listmonk: the Authorization: token header, a campaign made as a draft, and a second call that starts it.
+  if (pathname.startsWith("/letters/api/")) {
+    if (auth !== `token ${SITE.listmonk.api_user}:${SITE.listmonk.api_token}`) return { status: 403, body: { message: "invalid API credentials" } };
+    if (req.method === "GET" && pathname === "/letters/api/lists") return { body: { data: { results: [{ id: 4, name: "Verify readers" }, { id: 9, name: "Verify insiders" }], total: 2, per_page: "all", page: 1 } } };
+    if (req.method === "POST" && pathname === "/letters/api/media") {
+      more.listmonk.media.push({ multipart, ...formParts(text) });
+      return { body: { data: { id: more.listmonk.media.length, filename: "pixel.png", thumb_uri: "/uploads/pixel_thumb.png", uri: "/uploads/pixel.png" } } };
+    }
+    if (req.method === "POST" && pathname === "/letters/api/campaigns") {
+      const id = 40 + more.listmonk.campaigns.length;
+      more.listmonk.campaigns.push({ id, status: "draft", ...parsed() });
+      return { body: { data: { id, status: "draft", views: 0, clicks: 0 } } };
+    }
+    const status = req.method === "PUT" && pathname.match(/^\/letters\/api\/campaigns\/(\d+)\/status$/);
+    if (status) {
+      const campaign = more.listmonk.campaigns.find((c) => c.id === Number(status[1]));
+      if (!campaign) return { status: 400, body: { message: "Campaign not found." } };
+      if (campaign.subject.includes("[no smtp]")) return { status: 500, body: { message: "The stand-in has no way to send mail" } };
+      campaign.status = parsed().status;
+      more.listmonk.started.push({ id: campaign.id, status: campaign.status });
+      return { body: { data: { id: campaign.id, status: campaign.status } } };
+    }
+    const read = req.method === "GET" && pathname.match(/^\/letters\/api\/campaigns\/(\d+)$/);
+    if (read) {
+      more.listmonk.reads.push({ id: Number(read[1]), noBody: searchParams.get("no_body") });
+      return { body: { data: { id: Number(read[1]), views: 140, clicks: 9, bounces: 1, sent: 300, status: "finished" } } };
+    }
+  }
+
+  // The three that sign in. Each renews with its app's id and secret in the form body, and each refresh token works once.
+  const form = new URLSearchParams(text);
+  const renew = (name, prefix, app) => {
+    const kept = renewing[name];
+    const grant = form.get("grant_type");
+    more.tokenRequests.push({ name, auth, ...Object.fromEntries(form) });
+    if (search) more.queriesOnTokenEndpoints.push(url);
+    if (form.get("client_id") !== Object.values(app)[0] || form.get("client_secret") !== Object.values(app)[1]) return { status: 401, body: { error: "invalid_client", error_description: "The app's id or secret is wrong" } };
+    if (grant === "authorization_code" && form.get("code") !== "good-code") return { status: 400, body: { error: "invalid_grant", error_description: "The authorization code is not valid" } };
+    if (grant === "refresh_token" && form.get("refresh_token") !== kept.refresh) return { status: 400, body: { error: "invalid_grant", error_description: "The refresh token is not valid" } };
+    if (grant === "refresh_token") kept.spent.push(kept.refresh);
+    if (grant === "authorization_code") kept.verifiers.push(form.get("code_verifier"));
+    kept.n++;
+    kept.access = `${prefix}-access-${kept.n}`;
+    kept.refresh = `${prefix}-refresh-${kept.n}`;
+    kept.issued.add(`Bearer ${kept.access}`);
+    return { body: { token_type: "bearer", expires_in: 60, access_token: kept.access, refresh_token: kept.refresh } };
+  };
+  // Tumblr: one user with two blogs, and a post as NPF blocks, with any files in the same request.
+  if (pathname === "/api.tumblr.com/v2/oauth2/token") return renew("tumblr", "verify-tm", APP.tumblr);
+  if (pathname.startsWith("/api.tumblr.com/v2/")) {
+    if (!renewing.tumblr.issued.has(auth)) return { status: 401, body: { meta: { status: 401, msg: "Unauthorized" }, response: [] } };
+    if (pathname.endsWith("/user/info")) return { body: { meta: { status: 200, msg: "OK" }, response: { user: { name: "verify-user", blogs: [{ name: "verifypress", title: "Verify Press", primary: true }, { name: "verifyproofs", title: "Verify Proofs" }] } } } };
+    const posting = req.method === "POST" && pathname.match(/^\/api\.tumblr\.com\/v2\/blog\/([^/]+)\/posts$/);
+    if (posting) {
+      const parts = multipart ? formParts(text) : null;
+      const post = multipart ? JSON.parse(parts.fields.json ?? "{}") : parsed();
+      if (JSON.stringify(post.content ?? "").includes("[limit]")) return { status: 403, body: { meta: { status: 403, msg: "Forbidden" }, errors: [{ title: "The stand-in blog has reached its daily posting limit", code: 8023 }] } };
+      const id = `7300000000000000${String(more.tumblr.posts.length).padStart(2, "0")}`;
+      more.tumblr.posts.push({ id, blog: posting[1], multipart, file: parts?.file ?? null, ...post });
+      return { status: 201, body: { meta: { status: 201, msg: "Created" }, response: { id } } };
+    }
+  }
+  // Twitch: who the token belongs to, a channel looked up by login, and a chat message that names both.
+  if (pathname === "/id.twitch.tv/oauth2/token") return renew("twitch", "verify-tw", APP.twitch);
+  if (pathname.startsWith("/api.twitch.tv/helix/")) {
+    if (!renewing.twitch.issued.has(auth) || req.headers["client-id"] !== APP.twitch.client_id) return { status: 401, body: { error: "Unauthorized", status: 401, message: "Invalid OAuth token" } };
+    if (pathname.endsWith("/users")) {
+      const login = searchParams.get("login");
+      if (login) more.twitch.lookups.push(login);
+      if (login && login !== "verifychannel") return { body: { data: [] } };
+      return { body: { data: [login ? { id: "9002", login: "verifychannel", display_name: "VerifyChannel" } : { id: "9001", login: "verifystreamer", display_name: "Verify Streamer", profile_image_url: "" }] } };
+    }
+    if (req.method === "POST" && pathname.endsWith("/chat/messages")) {
+      const message = parsed();
+      if (String(message.message).includes("[again]")) return { body: { data: [{ message_id: "", is_sent: false, drop_reason: { code: "msg_duplicate", message: "Your message was not sent because it is identical to the previous one you sent, less than 30 seconds ago." } }] } };
+      const message_id = `verify-tw-message-${more.twitch.messages.length + 1}`;
+      more.twitch.messages.push({ message_id, contentType: req.headers["content-type"], ...message });
+      return { body: { data: [{ message_id, is_sent: true, drop_reason: null }] } };
+    }
+  }
+  // Kick: PKCE on the way in, the signed-in user, and a chat message sent as that user.
+  if (pathname === "/id.kick.com/oauth/token") return renew("kick", "verify-kk", APP.kick);
+  if (pathname.startsWith("/api.kick.com/public/v1/")) {
+    if (!renewing.kick.issued.has(auth)) return { status: 401, body: { data: {}, message: "Unauthorized" } };
+    if (pathname.endsWith("/users")) return { body: { data: [{ user_id: 7001, name: "verify_kick", email: "", profile_picture: "" }], message: "OK" } };
+    if (req.method === "POST" && pathname.endsWith("/chat")) {
+      const message = parsed();
+      const message_id = `0d4e5f6a-1b2c-4d3e-8f90-${String(more.kick.messages.length + 1).padStart(12, "0")}`;
+      more.kick.messages.push({ message_id, ...message });
+      return { body: { data: { is_sent: true, message_id }, message: "OK" } };
+    }
+  }
+  return null;
+}
+
 const feedXml = () =>
   `<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel><title>Verify Journal</title><link>https://journal.example/</link>${standinFeed.items
     .map((item) => `<item><title>${item.title}</title>${item.link ? `<link>${item.link}</link>` : ""}<guid isPermaLink="false">${item.guid}</guid>${item.date ? `<pubDate>${new Date(item.date).toUTCString()}</pubDate>` : ""}<description>${item.description ?? ""}</description></item>`)
@@ -211,6 +392,9 @@ function networks() {
         entry.served = true;
         return json({ created: Math.floor(Date.now() / 1000), data: [{ b64_json: PNG.toString("base64") }], output_format: asked.output_format, size: asked.size });
       }
+      // WordPress, Ghost, Listmonk, Tumblr, Twitch and Kick. The body is read as bytes kept one to a character, so a form's file cannot split a field.
+      const further = moreDestinations(req, url, raw.toString("latin1"), parsed);
+      if (further) return json(further.body, further.status ?? 200);
       // The networks that sign in. They live at fixed addresses, so scripts/standin-fetch.mjs sends them here as /<host>/<path>.
       const signedIn = signInNetworks(req, url, new URLSearchParams(text), parsed);
       if (signedIn) return json(signedIn.body, signedIn.status ?? 200);
@@ -230,6 +414,9 @@ const APP = {
   youtube: { client_id: "verify-yt-client-id", client_secret: "verify-yt-client-secret-c41d" },
   pinterest: { app_id: "verify-pin-app-id", app_secret: "verify-pin-app-secret-e06b" },
   threads: { app_id: "verify-th-app-id", app_secret: "verify-th-app-secret-b915" },
+  tumblr: { consumer_key: "verify-tm-consumer-key", consumer_secret: "verify-tm-consumer-secret-0c6e" },
+  twitch: { client_id: "verify-tw-client-id", client_secret: "verify-tw-client-secret-a17d", channel: "VerifyChannel" },
+  kick: { client_id: "verify-kk-client-id", client_secret: "verify-kk-client-secret-58f2" },
 };
 const PAGE_TOKENS = { 111: "verify-page-token-111-6c2a", 222: "verify-page-token-222-f0d4" };
 // Tokens that work once, as X's and Pinterest's refresh tokens do. Each lives 60 seconds, so Broadside must renew before every use.
@@ -474,7 +661,7 @@ try {
   const call = async (name, args = {}) => client.callTool({ name, arguments: args });
 
   const platforms = result(await call("list_platforms"));
-  ok(platforms.length >= 19 && platforms.every((p) => p.limits.maxChars > 0 && p.setup.length > 0), `list_platforms describes ${platforms.length} networks`);
+  ok(platforms.length === 25 && platforms.every((p) => p.limits.maxChars > 0 && p.setup.length > 0), `list_platforms describes ${platforms.length} networks`);
   const accounts = result(await call("list_accounts"));
   ok(accounts.length === 7 && accounts.every((a) => a.limits), "list_accounts returns the seven connected accounts with their limits");
   const link = result(await call("connect_account", { platform: "x" }));
@@ -1527,6 +1714,237 @@ try {
   ok(whileHanging.body.data.status === "published" && tookMs < 3000 && receiver.held.length > 0 && outOnTime - hangStarted < 9500, `A receiver that never answers delays no post: published in ${tookMs} ms, and a scheduled post went out on time while the delivery hung`);
   receiver.mode = "ok";
   for (const waiting of receiver.held) waiting.destroy();
+
+  /* More destinations ------------------------------------------------------- */
+
+  // WordPress, Ghost, Listmonk, Tumblr, Twitch and Kick, each against a stand-in that answers as its documentation says.
+  const sixBefore = (await via("GET", "/accounts")).body.data.length;
+  const six = {};
+  const tryConnect = (platform, credentials) => api("/api/v1/accounts", { method: "POST", headers: auth, body: JSON.stringify({ platform, credentials }) });
+  const sendTo = (accountId, content, extra = {}, options) => via("POST", "/posts", { content, targets: [{ account_id: accountId, ...(options ? { options } : {}) }], ...extra });
+  const only = (reply) => reply.body.data?.targets?.[0] ?? {};
+  const accountOn = async (platform) => (await via("GET", "/accounts")).body.data.find((a) => a.platform === platform)?.id;
+
+  // WordPress: a site of your own, with an application password
+  const wpSite = { site: `${net}/wp/`, ...SITE.wordpress };
+  six.wordpress = await connect("wordpress", wpSite);
+  const wpWrong = await tryConnect("wordpress", { ...wpSite, application_password: "vrfy WRNG 0000 0000 0000 0000" });
+  ok(
+    wpWrong.status === 400 && wpWrong.body.error.message === "WordPress answered 401: The provided password is an invalid application password." && !JSON.stringify(wpWrong.body).includes("WRNG") && (await via("GET", "/accounts")).body.data.length === sixBefore + 1,
+    "WordPress: a wrong application password is refused in WordPress's own words, which do not repeat it, and connects nothing",
+    JSON.stringify(wpWrong.body),
+  );
+  const wpPost = await sendTo(six.wordpress, "Verify goes to press\n\nRead the notes at https://example.com/notes. <b>Not markup</b> & more.", { media_ids: [media.id] });
+  const wpMedia = more.wordpress.media.at(-1);
+  const wpArticle = more.wordpress.posts.at(-1);
+  ok(
+    wpPost.body.data?.status === "published" && more.wordpress.media.length === 1 && wpMedia.multipart && wpMedia.file.field === "file" && wpMedia.file.filename.endsWith(".png") && wpMedia.file.type === "image/png" && wpMedia.fields.alt_text === "One pixel",
+    "WordPress: the image goes to the site's media library as a form, in the field named file, with its description",
+    JSON.stringify([only(wpPost), wpMedia]),
+  );
+  ok(
+    wpArticle.title === "Verify goes to press" && wpArticle.content === '<p>Read the notes at <a href="https://example.com/notes">https://example.com/notes</a>. &lt;b&gt;Not markup&lt;/b&gt; &amp; more.</p>' && wpArticle.status === "publish" && wpArticle.featured_media === wpMedia.id && wpArticle.contentType === "application/json" && only(wpPost).url === `https://blog.example/?p=${wpArticle.id}`,
+    "WordPress: the first line is the title, the rest is the content with markup escaped and the link kept, the image is the featured one, and the article's link comes back",
+    JSON.stringify(wpArticle),
+  );
+  const wpDraft = await sendTo(six.wordpress, "All of this is the body", {}, { title: "A title given for this account", status: "draft" });
+  ok(
+    only(wpDraft).status === "published" && more.wordpress.posts.at(-1).title === "A title given for this account" && more.wordpress.posts.at(-1).content === "<p>All of this is the body</p>" && more.wordpress.posts.at(-1).status === "draft",
+    "WordPress: a target's Title and Publish as options are sent in place of the first line and of publish",
+    JSON.stringify(more.wordpress.posts.at(-1)),
+  );
+  const wpSentSoFar = [more.wordpress.posts.length, more.wordpress.media.length].join();
+  const wpUntitled = await sendTo(six.wordpress, "", { media_ids: [media.id] });
+  const wpRefused = await sendTo(six.wordpress, "Not allowed here [refuse]\nThe body");
+  ok(
+    only(wpUntitled).status === "failed" && only(wpUntitled).error === "WordPress needs a title. Write it as the first line of the post, or set the Title option for this account." && only(wpRefused).error === "WordPress answered 403: Sorry, you are not allowed to create posts as this user." && [more.wordpress.posts.length, more.wordpress.media.length].join() === wpSentSoFar,
+    "WordPress: a post with no title is refused before anything is uploaded, with no title made up, and the site's own refusal is shown on the target",
+    JSON.stringify([only(wpUntitled), only(wpRefused)]),
+  );
+
+  // Ghost: an Admin API key that signs a short-lived token for every call
+  const ghostSite = { url: `${net}/journal`, admin_api_key: GHOST_KEY };
+  six.ghost = await connect("ghost", ghostSite);
+  const otherKey = `${SITE.ghost.id}:${randomBytes(32).toString("hex")}`;
+  const ghostWrong = await tryConnect("ghost", { ...ghostSite, admin_api_key: otherKey });
+  const ghostMisshapen = await tryConnect("ghost", { ...ghostSite, admin_api_key: "verify-not-a-ghost-key-3e91" });
+  ok(
+    ghostWrong.status === 400 && ghostWrong.body.error.message === "Ghost answered 401: Unknown Admin API Key" && ghostMisshapen.status === 400 && /^That does not look like a Ghost Admin API key\./.test(ghostMisshapen.body.error.message) && ![otherKey, otherKey.split(":")[1], "verify-not-a-ghost-key-3e91"].some((secret) => JSON.stringify([ghostWrong.body, ghostMisshapen.body]).includes(secret)),
+    "Ghost: a key Ghost does not know is refused in Ghost's words, a key of the wrong shape is refused before any call, and neither message repeats the key",
+    JSON.stringify([ghostWrong.body, ghostMisshapen.body]),
+  );
+  const ghostPost = await sendTo(six.ghost, "Verify in Ghost\nA first paragraph.\n\nMore at https://example.com/ghost", { media_ids: [media.id] }, { tags: "Verify, Launch notes" });
+  const ghostArticle = more.ghost.posts.at(-1);
+  const ghostImage = more.ghost.images.at(-1);
+  ok(
+    ghostPost.body.data?.status === "published" && ghostImage.multipart && ghostImage.file.field === "file" && ghostImage.fields.ref === ghostImage.file.filename && ghostImage.version === "v5.0",
+    "Ghost: the image is uploaded with file and ref, under the Accept-Version header",
+    JSON.stringify([only(ghostPost), ghostImage]),
+  );
+  ok(
+    ghostArticle.source === "html" && ghostArticle.title === "Verify in Ghost" && ghostArticle.html === '<p>A first paragraph.</p>\n<p>More at <a href="https://example.com/ghost">https://example.com/ghost</a></p>' && ghostArticle.status === "published" && same(ghostArticle.tags, ["Verify", "Launch notes"]) && ghostArticle.feature_image === "https://journal.example/content/images/pixel-1.png" && ghostArticle.feature_image_alt === "One pixel" && only(ghostPost).url === `https://journal.example/${ghostArticle.id}/`,
+    "Ghost: the article is created from HTML with its title, tags and feature image, and the address Ghost gives it comes back",
+    JSON.stringify(ghostArticle),
+  );
+  const ghostDraft = await sendTo(six.ghost, "A draft for Ghost", {}, { status: "draft" });
+  ok(
+    only(ghostDraft).status === "published" && more.ghost.posts.at(-1).status === "draft" && !("html" in more.ghost.posts.at(-1)) && more.ghost.tokens.filter((t) => t.valid).length >= 4 && more.ghost.tokens.filter((t) => t.valid).every((t) => t.lifetime === 300),
+    "Ghost: Publish as draft leaves the article unpublished, and every call carried a token signed with the key's secret, good for five minutes",
+    JSON.stringify([more.ghost.posts.at(-1), more.ghost.tokens]),
+  );
+
+  // Listmonk: a post becomes a campaign, and a second call sends it
+  const letters = { url: `${net}/letters`, ...SITE.listmonk, lists: "verify READERS" };
+  six.listmonk = await connect("listmonk", letters);
+  const lmNoList = await tryConnect("listmonk", { ...letters, lists: "Nobody at all" });
+  const lmWrong = await tryConnect("listmonk", { ...letters, api_token: "verify-lm-wrong-token-7d20" });
+  ok(
+    lmNoList.status === 400 && lmNoList.body.error.message === 'This Listmonk has no list called "Nobody at all" that the API user may see.' && lmWrong.status === 400 && lmWrong.body.error.message === "Listmonk answered 403: invalid API credentials" && !JSON.stringify(lmWrong.body).includes("verify-lm-wrong-token-7d20"),
+    "Listmonk: a list it does not have is refused by name, and a wrong token in Listmonk's own words, which do not repeat it",
+    JSON.stringify([lmNoList.body, lmWrong.body]),
+  );
+  const lmPost = await sendTo(six.listmonk, "Verify newsletter\n\nHello & welcome.\nRead https://example.com/letter", { media_ids: [media.id] });
+  const campaign = more.listmonk.campaigns.at(-1);
+  ok(
+    lmPost.body.data?.status === "published" && campaign.name === "Verify newsletter" && campaign.subject === "Verify newsletter" && same(campaign.lists, [4]) && campaign.type === "regular" && campaign.content_type === "html" && campaign.messenger === "email" && campaign.altbody === "Hello & welcome.\nRead https://example.com/letter" &&
+      campaign.body === `<p>Hello &amp; welcome.<br>Read <a href="https://example.com/letter">https://example.com/letter</a></p>\n<figure><img src="${net}/uploads/pixel.png" alt="One pixel"></figure>` && more.listmonk.media.at(-1).file.field === "file",
+    "Listmonk: the campaign carries the subject, the list found by name, the email as HTML with a plain-text copy, and the image uploaded to Listmonk",
+    JSON.stringify(campaign),
+  );
+  ok(same(more.listmonk.started, [{ id: campaign.id, status: "running" }]) && only(lmPost).external_id === String(campaign.id), "Listmonk: the campaign is then started, which is what sends it");
+  const lmDraft = await sendTo(six.listmonk, "A newsletter to look at first\nBody", {}, { status: "draft" });
+  ok(only(lmDraft).status === "published" && more.listmonk.campaigns.at(-1).status === "draft" && more.listmonk.started.length === 1, "Listmonk: with Campaign set to draft, the campaign is made and nothing is sent");
+  const lmStuck = await sendTo(six.listmonk, "Cannot go out [no smtp]\nBody");
+  const stuckId = more.listmonk.campaigns.at(-1).id;
+  const campaignsAfterStuck = more.listmonk.campaigns.length;
+  await sleep(1500);
+  ok(
+    only(lmStuck).status === "failed" && only(lmStuck).error === `Listmonk made campaign ${stuckId} as a draft and would not start it. Start it in Listmonk, or delete it there before trying again. Listmonk answered 500: The stand-in has no way to send mail` && more.listmonk.campaigns.length === campaignsAfterStuck,
+    "Listmonk: when it will not start a campaign, the target says which campaign was left as a draft, and it is not sent again to make a second one",
+    JSON.stringify(only(lmStuck)),
+  );
+  const lmNumbers = await until(async () => {
+    await via("POST", `/posts/${lmPost.body.data.id}/analytics/refresh`);
+    const data = await numbersOf(lmPost.body.data.id);
+    return on(data, "listmonk").metrics.length ? data : null;
+  }, "Listmonk's numbers to be read", 60000);
+  ok(
+    same(on(lmNumbers, "listmonk").metrics, [metric("views", "Views", 140), metric("clicks", "Clicks", 9)]) && more.listmonk.reads.some((r) => r.id === campaign.id && r.noBody === "true"),
+    "Listmonk: a campaign's views and clicks are read back, without its body",
+    JSON.stringify(on(lmNumbers, "listmonk")),
+  );
+
+  // Tumblr: sign in, choose a blog, post blocks with the file in the same request
+  const tmIn = await signIn("tumblr");
+  const tmChoice = tmIn.back.searchParams.get("choose");
+  const tmOffered = await api(`/api/v1/oauth/choices/${tmChoice}`, { headers: auth });
+  const tmTwo = await api(`/api/v1/oauth/choices/${tmChoice}`, { method: "POST", headers: ui, body: JSON.stringify({ choices: ["verifypress", "verifyproofs"] }) });
+  const tmPicked = await api(`/api/v1/oauth/choices/${tmChoice}`, { method: "POST", headers: ui, body: JSON.stringify({ choices: ["verifyproofs"] }) });
+  ok(
+    tmIn.address.origin + tmIn.address.pathname === "https://www.tumblr.com/oauth2/authorize" && tmIn.address.searchParams.get("scope") === "basic write offline_access" && tmIn.address.searchParams.get("client_id") === APP.tumblr.consumer_key && !tmIn.url.includes(APP.tumblr.consumer_secret) && same(tmOffered.body.data.choices.map((c) => [c.id, c.name, c.detail]), [["verifypress", "Verify Press", "verifypress.tumblr.com"], ["verifyproofs", "Verify Proofs", "verifyproofs.tumblr.com"]]) && tmTwo.status === 400 && /one at a time/.test(tmTwo.body.error.message) && tmPicked.body.data?.connected[0].handle === "verifyproofs.tumblr.com",
+    "Continue with Tumblr asks for the scopes that post and stay signed in, lists the blogs and connects the one picked",
+    JSON.stringify([tmIn.landed.location, tmOffered.body, tmTwo.body, tmPicked.body]),
+  );
+  six.tumblr = tmPicked.body.data.connected[0].id;
+  const tmPost = await sendTo(six.tumblr, "Verify on Tumblr, see https://example.com/tumblr.\n\nA second paragraph", { media_ids: [media.id] }, { tags: "verify, print" });
+  const tmSent = more.tumblr.posts.at(-1);
+  ok(
+    tmPost.body.data?.status === "published" && tmSent.blog === "verifyproofs" && tmSent.multipart && tmSent.file.field === "media-0" && tmSent.file.type === "image/png" && tmSent.state === "published" && tmSent.tags === "verify,print" &&
+      same(tmSent.content, [
+        { type: "image", media: [{ type: "image/png", identifier: "media-0" }], alt_text: "One pixel" },
+        { type: "text", text: "Verify on Tumblr, see https://example.com/tumblr.", formatting: [{ start: 22, end: 48, type: "link", url: "https://example.com/tumblr" }] },
+        { type: "text", text: "A second paragraph" },
+      ]) && only(tmPost).url === `https://verifyproofs.tumblr.com/post/${tmSent.id}`,
+    "Tumblr: the post is blocks, one per paragraph with its link marked, and the image travels in the same request under the name its block gives it",
+    JSON.stringify([only(tmPost), tmSent]),
+  );
+  const tmCount = more.tumblr.posts.length;
+  const tmTooLong = await sendTo(six.tumblr, "t".repeat(4097));
+  const tmLimited = await sendTo(six.tumblr, "One too many today [limit]");
+  ok(
+    tmTooLong.status === 400 && /Tumblr allows 4096 characters; this is 4097/.test(JSON.stringify(tmTooLong.body)) && only(tmLimited).status === "failed" && only(tmLimited).error === "Tumblr answered 403: The stand-in blog has reached its daily posting limit" && more.tumblr.posts.length === tmCount,
+    "Tumblr: a post past its limit is refused before anything is sent, and Tumblr's own refusal is read from its list of errors",
+    JSON.stringify([tmTooLong.body, only(tmLimited)]),
+  );
+
+  // Twitch: sign in, name a channel, chat as yourself
+  const twIn = await signIn("twitch");
+  six.twitch = await accountOn("twitch");
+  ok(
+    twIn.address.origin + twIn.address.pathname === "https://id.twitch.tv/oauth2/authorize" && twIn.address.searchParams.get("scope") === "user:write:chat" && !twIn.url.includes(APP.twitch.client_secret) && twIn.back.searchParams.get("connected") === "Verify Streamer in verifychannel's chat" && same(more.twitch.lookups, ["verifychannel"]) && Boolean(six.twitch),
+    "Continue with Twitch asks for the one scope that writes chat, and connects the member who approved in the channel that was named",
+    twIn.landed.location,
+  );
+  const twPost = await via("POST", "/posts", { content: "Verify is live in ten minutes", thread: ["Bring your questions"], targets: [{ account_id: six.twitch }] });
+  const [twFirst, twSecond] = more.twitch.messages.slice(-2);
+  ok(
+    twPost.body.data?.status === "published" && same([twFirst.broadcaster_id, twFirst.sender_id, twFirst.message, twFirst.reply_parent_message_id], ["9002", "9001", "Verify is live in ten minutes", undefined]) && twFirst.contentType === "application/json" && same([twSecond.broadcaster_id, twSecond.sender_id, twSecond.message, twSecond.reply_parent_message_id], ["9002", "9001", "Bring your questions", twFirst.message_id]) && only(twPost).parts[1].id === twSecond.message_id,
+    "Twitch: the post is one chat message naming the channel and the sender, and the next part of a thread is sent as a reply to it",
+    JSON.stringify([only(twPost), twFirst, twSecond]),
+  );
+  const twCount = more.twitch.messages.length;
+  const twDropped = await sendTo(six.twitch, "Said twice [again]");
+  ok(
+    only(twDropped).status === "failed" && only(twDropped).error === "Twitch did not send the message: Your message was not sent because it is identical to the previous one you sent, less than 30 seconds ago." && more.twitch.messages.length === twCount,
+    "Twitch: a message its chat rules dropped is reported as not sent, with Twitch's reason",
+    JSON.stringify(only(twDropped)),
+  );
+
+  // Kick: sign in with PKCE on localhost, chat as yourself
+  const kkIn = await signIn("kick");
+  six.kick = await accountOn("kick");
+  ok(
+    kkIn.address.origin + kkIn.address.pathname === "https://id.kick.com/oauth/authorize" && kkIn.address.searchParams.get("scope") === "user:read chat:write" && kkIn.address.searchParams.get("code_challenge_method") === "S256" && kkIn.redirect.href === `http://localhost:${port}/oauth/kick/callback` && !kkIn.url.includes(APP.kick.client_secret) &&
+      createHash("sha256").update(renewing.kick.verifiers.at(-1) ?? "").digest("base64url") === kkIn.address.searchParams.get("code_challenge") && kkIn.back.searchParams.get("connected") === "verify_kick" && Boolean(six.kick),
+    "Continue with Kick uses PKCE and a localhost redirect address, exchanges the code with the verifier behind the challenge, and connects the member who approved",
+    kkIn.landed.location,
+  );
+  const kkPost = await sendTo(six.kick, "Verify is live on Kick");
+  const kkSent = more.kick.messages.at(-1);
+  ok(
+    kkPost.body.data?.status === "published" && same([kkSent.broadcaster_user_id, kkSent.content, kkSent.type, kkSent.reply_to_message_id], [7001, "Verify is live on Kick", "user", undefined]) && only(kkPost).external_id === kkSent.message_id,
+    "Kick: the post is a chat message sent as the user, in their own channel's chat",
+    JSON.stringify([only(kkPost), kkSent]),
+  );
+  const kkCount = more.kick.messages.length;
+  const kkHeavy = await sendTo(six.kick, "👨‍👨‍👦".repeat(120));
+  const chatWithPicture = await via("POST", "/posts", { content: "A picture for chat", media_ids: [media.id], targets: [{ account_id: six.twitch }, { account_id: six.kick }] });
+  const chatTooLong = await via("POST", "/posts", { content: "c".repeat(501), targets: [{ account_id: six.twitch }, { account_id: six.kick }] });
+  ok(
+    only(kkHeavy).status === "failed" && only(kkHeavy).error === "Kick allows 2,048 bytes in a message; this is 2160." && chatWithPicture.status === 400 && ["Twitch does not take images here.", "Kick does not take images here."].every((reason) => JSON.stringify(chatWithPicture.body).includes(reason)) && chatTooLong.status === 400 && ["Twitch allows 500 characters; this is 501.", "Kick allows 500 characters; this is 501."].every((reason) => JSON.stringify(chatTooLong.body).includes(reason)) && more.kick.messages.length === kkCount && more.twitch.messages.length === twCount,
+    "Twitch and Kick: a picture and a message of 501 characters are refused by name, and a Kick message over 2,048 bytes is refused, with nothing sent",
+    JSON.stringify([only(kkHeavy), chatWithPicture.body, chatTooLong.body]),
+  );
+
+  // What the six have in common
+  ok(
+    ["tumblr", "twitch", "kick"].every((name) => renewing[name].spent.length >= 2 && new Set(renewing[name].spent).size === renewing[name].spent.length) && more.queriesOnTokenEndpoints.length === 0 && more.tokenRequests.length >= 9 && more.tokenRequests.every((r) => !r.auth && r.client_secret === Object.values(APP[r.name])[1]),
+    "Tumblr, Twitch and Kick renewed their sign-in before each call, never spent a refresh token twice, and sent the app's secret in the form body and never in an address",
+    JSON.stringify(Object.fromEntries(Object.entries(renewing).map(([name, kept]) => [name, kept.spent.length]))),
+  );
+  const sixDescribed = Object.fromEntries((await via("GET", "/platforms")).body.data.map((p) => [p.id, p]));
+  ok(
+    ["wordpress", "ghost", "listmonk"].every((id) => sixDescribed[id].oauth === null && sixDescribed[id].threads === false && sixDescribed[id].limits.maxImages === 10 && sixDescribed[id].options.some((o) => o.key === "title") && sixDescribed[id].docs_url.startsWith("https://")) &&
+      ["tumblr", "twitch", "kick"].every((id) => sixDescribed[id].oauth.callback_path === `/oauth/${id}/callback` && sixDescribed[id].oauth.paste.length >= 3) && sixDescribed.kick.oauth.loopback === "localhost" && sixDescribed.twitch.threads && sixDescribed.kick.threads && !sixDescribed.tumblr.threads &&
+      sixDescribed.twitch.limits.maxChars === 500 && sixDescribed.kick.limits.maxChars === 500 && sixDescribed.tumblr.limits.maxImages === 30 && sixDescribed.listmonk.metrics.available && same(sixDescribed.listmonk.metrics.reports.map((r) => r.label), ["Views", "Clicks"]) && ["wordpress", "ghost", "tumblr", "twitch", "kick"].every((id) => !sixDescribed[id].metrics.available && sixDescribed[id].metrics.reason.length > 20),
+    "GET /platforms describes the six: what each asks for, its limits and options, which take a thread, which sign in, and which report numbers",
+  );
+  const sixSecrets = [SITE.wordpress.application_password, Buffer.from(`${SITE.wordpress.username}:${SITE.wordpress.application_password}`).toString("base64"), GHOST_KEY, SITE.ghost.secret, SITE.listmonk.api_token, APP.tumblr.consumer_secret, APP.twitch.client_secret, APP.kick.client_secret, ...Object.values(renewing).flatMap((kept) => [kept.access, kept.refresh, ...kept.spent])];
+  const sixAccounts = await via("GET", "/accounts");
+  const sixPosts = await via("GET", "/posts?limit=100");
+  ok(
+    sixAccounts.body.data.length === sixBefore + 6 && sixSecrets.every((secret) => secret && !JSON.stringify(sixAccounts.body).includes(secret) && !JSON.stringify(sixPosts.body).includes(secret) && !log.includes(secret)),
+    "Six accounts were connected, and none of their passwords, keys or tokens is in the account list, in any post or error, or in the server's log",
+  );
+  const wpDialog = await page("/app/accounts?connect=wordpress");
+  const kickDialog = await page("/app/accounts?connect=kick");
+  // React puts a comment between a number and the words after it; the reader sees neither.
+  const landing = (await page("/")).replaceAll("<!-- -->", "");
+  ok(
+    wpDialog.includes("Application password") && wpDialog.includes("Site address") && !wpDialog.includes("Continue with WordPress") && kickDialog.includes("Continue with Kick") && kickDialog.includes("Paste tokens instead") && kickDialog.includes("chat:write"),
+    "The connect dialog asks WordPress for a site address and an application password, and offers Kick a sign-in with the scopes it will ask for",
+  );
+  ok(landing.includes("24 networks, your own keys") && ["WordPress", "Ghost", "Listmonk", "Tumblr", "Twitch", "Kick"].every((name) => landing.includes(name)), "The landing page counts 24 networks and names the six new ones");
 
   // The optional password: a second boot with BROADSIDE_PASSWORD set
   app.kill("SIGTERM");

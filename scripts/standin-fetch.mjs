@@ -18,6 +18,11 @@ if (standin) {
     "oauth2.googleapis.com",
     "www.googleapis.com",
     "api.pinterest.com",
+    "api.tumblr.com",
+    "id.twitch.tv",
+    "api.twitch.tv",
+    "id.kick.com",
+    "api.kick.com",
     // Image generation. With this file loaded, no request for OpenAI leaves the machine, whatever key the server holds.
     "api.openai.com",
   ]);

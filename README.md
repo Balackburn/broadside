@@ -6,7 +6,7 @@ A broadside is a single printed sheet posted in public, and a ship firing every 
 
 ## What it does
 
-Broadside posts to 18 destinations at once: X, Bluesky, Threads, Mastodon, LinkedIn, Instagram, Facebook Pages, TikTok, YouTube, Pinterest, Reddit, Telegram, Discord, Slack, Nostr, Lemmy, DEV and any webhook destination (Zapier, n8n, Make or your own server). A sandbox destination lets you rehearse without posting anywhere.
+Broadside posts to 24 destinations at once: X, Bluesky, Threads, Mastodon, LinkedIn, Instagram, Facebook Pages, TikTok, YouTube, Pinterest, Tumblr, Reddit, Telegram, Discord, Slack, Twitch chat, Kick chat, Nostr, Lemmy, DEV, WordPress, Ghost, Listmonk and any webhook destination (Zapier, n8n, Make or your own server). A sandbox destination lets you rehearse without posting anywhere.
 
 It checks every account against that network's rules before it sends anything. If one copy is too long or carries media the network rejects, the post is held and you are told which network and by how much. Give that account its own version and send again.
 
@@ -133,7 +133,7 @@ You connect each account with credentials you create yourself; the app shows the
 
 | Simple (a token, password or URL) | Needs your own developer app |
 | --- | --- |
-| Bluesky, Mastodon, Telegram, Discord, Slack, Nostr, Lemmy, DEV, Reddit, Webhook | X, Threads, LinkedIn, Instagram, Facebook Pages, TikTok, YouTube, Pinterest |
+| Bluesky, Mastodon, Telegram, Discord, Slack, Nostr, Lemmy, DEV, Reddit, WordPress, Ghost, Listmonk, Webhook | X, Threads, LinkedIn, Instagram, Facebook Pages, TikTok, YouTube, Pinterest, Tumblr, Twitch, Kick |
 
 The networks in the second column connect by signing in. You paste your app's id and secret, press **Continue with** the network, approve on its own page, and land back in Broadside connected. Broadside has no app of its own with any network, so nothing is shared with anyone else's install. The dialog shows the exact redirect address to register in your app and the permissions it will ask for.
 
@@ -146,19 +146,33 @@ The networks in the second column connect by signing in. You paste your app's id
 | YouTube | `http://localhost:3000` or `http://127.0.0.1:3000` | Until you revoke it. Seven days while the Google app's consent screen is in Testing. |
 | Pinterest | `http://localhost:3000` | 30 days, renewed when Broadside posts. Lapses after 60 days without a post. |
 | TikTok | The address shown in the dialog | Renewed each time Broadside posts. |
+| Tumblr | The address shown in the dialog | 42 minutes at a time, renewed each time Broadside posts. |
+| Twitch | `http://localhost:3000` | For as long as Twitch says when it issues the token, renewed when Broadside posts. |
+| Kick | `http://localhost:3000` (Kick's sign-in page rewrites `127.0.0.1`) | For as long as Kick says when it issues the token, renewed when Broadside posts. |
 
 Broadside answers on both `localhost` and `127.0.0.1`, and uses the one each network accepts whichever you browse by. With `BROADSIDE_PUBLIC_URL` set, that address is used for every network.
 
-After signing in to Facebook or Instagram you pick which Pages or Instagram accounts to connect, and each becomes its own account. Pinterest asks which board to pin to. YouTube connects the channel of the Google account you signed in with.
+After signing in to Facebook or Instagram you pick which Pages or Instagram accounts to connect, and each becomes its own account. Pinterest asks which board to pin to, and Tumblr which blog to post to; sign in again to connect a second one. YouTube connects the channel of the Google account you signed in with. Twitch and Kick connect the person who signed in, who then writes in their own channel's chat unless another channel is named in the form.
+
+WordPress, Ghost and Listmonk are sites you run, so each is connected by its address and a credential made on the site itself:
+
+| Site | What you bring | What a post becomes |
+| --- | --- | --- |
+| WordPress, hosted yourself, 5.6 or later, on https | Your username and an application password from Users, Profile in wp-admin | An article. The first image is its featured image |
+| Ghost | The Admin API key of a custom integration, from Settings, Integrations | An article. The first image is its feature image. Members are not emailed |
+| Listmonk | An API user's name and token from Admin, Users, and the lists to send to | A campaign, sent to those lists at once |
+
+All three need a title, which Listmonk calls the subject. It is the first line of the post, and the rest is the body; a target can carry its own in the `title` option instead. A post with neither is refused, and no title is made up. The body is plain text: blank lines separate paragraphs, a web address becomes a link, and anything that looks like markup is shown as typed. Each takes a `status` option on the target: `draft` leaves the article unpublished, or the campaign unsent, to finish on the site.
 
 Threads accepts only https redirect addresses, so on `http://localhost` its dialog asks for a token from the Threads User token generator instead. Every sign-in network can also be connected with tokens you made by hand: choose **Paste tokens instead** in the dialog, or send them to `POST /api/v1/accounts`. `GET /api/v1/platforms` lists the fields for each under `oauth.paste`. X accounts connected with the four OAuth 1.0a keys keep working.
 
 Things worth knowing before you rely on a network:
 
-- **Numbers are tested the way posting is: against documented shapes and stand-ins, not live networks.** `npm run verify` reads numbers end to end from stand-in Mastodon, Bluesky, Discord, X, Facebook and Pinterest; the rest are covered by request-shape tests. Bluesky's and Reddit's numbers were written from the published lexicon and Reddit's JSON wiki, without their reference pages to hand, so check those two against one post first. DEV documents only a reaction count, so comments and page views are not read. Where a network leaves a field out of a post nobody reacted to or shared (Discord's reactions, Facebook's shares), Broadside reads that as none.
+- **Numbers are tested the way posting is: against documented shapes and stand-ins, not live networks.** `npm run verify` reads numbers end to end from stand-in Mastodon, Bluesky, Discord, X, Facebook, Pinterest and Listmonk; the rest are covered by request-shape tests. Bluesky's and Reddit's numbers were written from the published lexicon and Reddit's JSON wiki, without their reference pages to hand, so check those two against one post first. DEV documents only a reaction count, so comments and page views are not read. Where a network leaves a field out of a post nobody reacted to or shared (Discord's reactions, Facebook's shares), Broadside reads that as none.
 
-- **These connectors are tested against each network's documented API shapes, not against the live networks.** `npm run verify` exercises Mastodon, Bluesky, Discord, Telegram, Slack and the webhook against local stand-ins, and the sign-in of X, LinkedIn, Facebook Pages, Instagram, YouTube and Pinterest against stand-ins that behave as those networks document; the rest are covered by request-shape tests. No sign-in has been run against a live network from this repository. Try a new account with one post before scheduling many.
-- **Threads work on 11 networks.** X, Bluesky, Mastodon, Threads, Telegram, Reddit, Lemmy and Nostr publish each part as a reply to the one before. Facebook Pages, Instagram and LinkedIn publish each part as a comment under the post. Some need an extra permission: `pages_manage_engagement` on Facebook, `instagram_manage_comments` on Instagram and `threads_manage_replies` on Threads. Discord, Slack, TikTok, YouTube, Pinterest, DEV and the webhook cannot take a thread. `npm run verify` proves threads against the Mastodon, Bluesky and Telegram stand-ins; the other eight are covered by request-shape tests.
+- **These connectors are tested against each network's documented API shapes, not against the live networks.** `npm run verify` exercises Mastodon, Bluesky, Discord, Telegram, Slack, WordPress, Ghost, Listmonk and the webhook against local stand-ins, and the sign-in of X, LinkedIn, Facebook Pages, Instagram, YouTube, Pinterest, Tumblr, Twitch and Kick against stand-ins that behave as those networks document; the rest are covered by request-shape tests. No sign-in has been run against a live network from this repository. Try a new account with one post before scheduling many.
+- **Threads work on 13 networks.** X, Bluesky, Mastodon, Threads, Telegram, Reddit, Lemmy, Nostr, Twitch and Kick publish each part as a reply to the one before. Facebook Pages, Instagram and LinkedIn publish each part as a comment under the post. Some need an extra permission: `pages_manage_engagement` on Facebook, `instagram_manage_comments` on Instagram and `threads_manage_replies` on Threads. Discord, Slack, TikTok, YouTube, Pinterest, Tumblr, DEV, WordPress, Ghost, Listmonk and the webhook cannot take a thread. `npm run verify` proves threads against the Mastodon, Bluesky, Telegram and Twitch stand-ins; the other nine are covered by request-shape tests.
+- **The six newest destinations were written from documentation read on 15 November 2026.** WordPress, Ghost, Listmonk, Tumblr, Twitch chat and Kick chat each name the pages they were written from, and what those pages left open, at the top of their connector. Three things to know: Tumblr takes 4,096 characters in a paragraph and Broadside holds the whole post to that; a Twitch or Kick post is one chat message of 500 characters with no media; and a Listmonk post emails the lists as soon as it is published, unless its target says `draft`.
 - **Repeating posts count their dates from the first occurrence.** A monthly post set for the 31st goes out on the last day of shorter months and returns to the 31st. With a time zone the post keeps its local clock time when the clocks change; without one the dates are counted in UTC. Occurrences missed while Broadside was not running are skipped, so the next one is always in the future.
 - **Instagram, Threads, Slack, DEV, Nostr and TikTok photos fetch media from a public URL.** Set `BROADSIDE_PUBLIC_URL` to where this app is reachable from the internet, or attach media by URL.
 - **TikTok and Pinterest restrict unapproved apps:** TikTok posts are private or inbox drafts until the app is audited; Pinterest trial-access pins are visible only to you.
@@ -187,6 +201,7 @@ A thread is counted by its first part. Totals add up the latest reading of each 
 | Lemmy | Upvotes, score, comments | Nothing more |
 | DEV | Reactions | Nothing more |
 | Discord | Reactions, added up across emoji | Nothing more |
+| Listmonk | Views, clicks | Nothing more |
 
 Not available, and shown as such instead of zeros:
 
@@ -194,6 +209,9 @@ Not available, and shown as such instead of zeros:
 - **Telegram.** The Bot API has no way to ask for a message's views or reactions.
 - **Nostr.** A note has no count. Reactions and replies are separate notes spread across relays, and no relay holds them all.
 - **Slack and the webhook.** They receive a post and report nothing back.
+- **WordPress and Ghost.** Neither API documents a count of views or likes for an article.
+- **Tumblr.** Likes, reblogs and replies are counted together as notes, and read only by a request that carries the app's key in its address, which Broadside does not send.
+- **Twitch and Kick.** A chat message has no count.
 
 **Accounts connected before analytics.** Threads, Instagram, Facebook Pages, TikTok and Pinterest now ask for one more permission when you sign in (the ones in the table). Accounts you connected earlier do not have it. They keep posting as before; their numbers show the network's refusal with a note to reconnect, and Facebook Pages still show reactions, comments and shares. Reconnect an account to grant the permission. A TikTok app must have `video.list` added to it first, or list its scopes without it in the Scopes field and go without TikTok numbers.
 
@@ -396,7 +414,7 @@ Credentials are encrypted with AES-256-GCM and never returned by any API. The da
 
 Uploads are checked by their bytes, not their name, and only real images and videos are kept. They are served with a sandboxing policy, so a stored file is shown and never run. Every page carries a closed content security policy and cannot be framed.
 
-Outbound requests to addresses you type (media to import, a Mastodon instance, a webhook, a feed, an outgoing webhook) are refused if they point at this machine or a private network, including after a redirect. Opt in with `BROADSIDE_ALLOW_PRIVATE_FETCH=1` for local targets.
+Outbound requests to addresses you type (media to import, a Mastodon instance, a WordPress, Ghost or Listmonk site, a webhook, a feed, an outgoing webhook) are refused if they point at this machine or a private network, including after a redirect. Opt in with `BROADSIDE_ALLOW_PRIVATE_FETCH=1` for local targets.
 
 Feeds are text from someone else's server, and are treated that way. A feed is fetched through the same guard, with a 2 MB cap applied after decompression and a 15 second timeout. The XML reader is Broadside's own and does only what feeds need: it never processes a document type, so a feed that declares entities (the route to entity expansion and to reading local files or internal addresses) is refused whole, and one that only names a public DTD has it skipped and never fetched. Only the five XML entities and numeric references are decoded, once. Depth, element count and items read are capped. Titles and summaries are reduced to plain text and stored and shown as text; nothing from a feed is rendered as HTML, and a link is kept only if it is an http or https address. Placeholders are filled in one pass, so an item cannot smuggle a placeholder into its own text.
 
