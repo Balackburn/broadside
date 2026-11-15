@@ -18,12 +18,14 @@ A scheduled post can repeat every day, week or month, with an optional end date.
 
 Four things keep a busy install in order:
 
-- **Media library.** Everything you upload or import by link is kept under **Media**, newest first, with its type, size, description and the posts that use it. Attach a file to as many posts as you like with **Choose from library** in the composer. A file that a draft, a scheduled post or a failed post still needs cannot be deleted, and Broadside says how many posts hold it; once those posts are out, it can go.
+- **Media library.** Everything you upload, import by link or generate is kept under **Media**, newest first, with its type, size, description and the posts that use it. Attach a file to as many posts as you like with **Choose from library** in the composer. A file that a draft, a scheduled post or a failed post still needs cannot be deleted, and Broadside says how many posts hold it; once those posts are out, it can go.
 - **Tags.** A post can carry short names such as `launch` or `weekly`. Type a new one in the composer or pick an existing one, then filter **Posts** and **Calendar** by tag. Renaming a tag renames it on every post. Deleting a tag takes it off its posts and deletes no post. Tags are never published.
 - **Account groups.** A group is a named set of connected accounts, such as "Launch day". Make groups under **Accounts**; picking one in the composer selects exactly its accounts. Disconnect an account and its groups have one fewer member.
 - **Signatures.** A signature is saved text for the end of a post: a sign-off or a set of hashtags. **Add signature** in the composer puts it into the post text, where you can edit it and it counts toward every network's limit. An account can have a default signature. The composer offers it for that account and adds it only when you ask.
 
 It reads back the numbers. For each published post Broadside asks the network for the counts it holds: views or impressions, likes, comments, shares, saves and clicks, whichever that network reports. **Analytics** shows totals for the last 7, 30 or 90 days, a breakdown by network and a row for each copy of a post, and an expanded post in **Posts** shows its numbers with a **Refresh numbers** action. Every figure is a reading stored with the time it was taken, shown as "as of". Nothing is estimated: a count a network does not report is absent, and a network with no numbers to read is named with the reason. See [Analytics](#analytics).
+
+It can make a picture for a post. If you set your own OpenAI key on the server, **Generate an image** in the media library and in the composer turns a text prompt into an image, billed to your OpenAI account and held to a daily limit you set. Without a key the feature is not there and nothing is sent anywhere. See [Image generation](#image-generation).
 
 It can work without being asked each time. **Automations** holds two things: RSS and Atom feeds whose new items become posts, saved as drafts unless you choose otherwise, and outgoing webhooks, which tell your other tools when a post is published, fails or is scheduled. See [Automations](#automations).
 
@@ -71,7 +73,9 @@ Any Streamable HTTP client works with the same URL and header. A local stdio ser
 { "mcpServers": { "broadside": { "command": "npx", "args": ["tsx", "/path/to/broadside/bin/broadside-mcp.ts"] } } }
 ```
 
-Tools: `list_platforms`, `list_accounts`, `list_groups`, `connect_account`, `disconnect_account`, `upload_media`, `list_media`, `list_tags`, `list_signatures`, `check_post`, `create_post`, `get_post`, `list_posts`, `update_post`, `publish_post`, `cancel_post`, `stop_series`, `retry_target`, `delete_post`, `get_analytics`, `get_post_analytics`, `list_feeds`, `list_outgoing_webhooks`.
+Tools: `list_platforms`, `list_accounts`, `list_groups`, `connect_account`, `disconnect_account`, `upload_media`, `list_media`, `list_tags`, `list_signatures`, `check_post`, `create_post`, `get_post`, `list_posts`, `update_post`, `publish_post`, `cancel_post`, `stop_series`, `retry_target`, `delete_post`, `get_analytics`, `get_post_analytics`, `list_feeds`, `list_outgoing_webhooks`, and `generate_image` where [image generation](#image-generation) is turned on.
+
+`generate_image` takes a `prompt` and an optional `shape` and returns a `media_id` for `create_post`. It is listed only when the server has an OpenAI key. Each call is billed to the OpenAI account behind that key and uses one of the day's images, and the tool's description tells the agent so.
 
 `get_analytics` (a period of 7, 30 or 90 days, and optionally an account or a tag) and `get_post_analytics` are read-only. They report the readings Broadside has stored and ask no network.
 
@@ -102,6 +106,7 @@ Add `"tags": ["launch", "weekly"]` to tag a post; a tag that does not exist yet 
 | `POST /oauth/{platform}/start` | Begin a sign-in with your app's id and secret; returns the address to open in a browser |
 | `GET, POST /oauth/choices/{id}` | After a sign-in that ends in a choice: what is on offer, and `{"choices": [ids]}` to connect them |
 | `GET, POST /media` · `PATCH, DELETE /media/{id}` | The library, newest first, each file with the posts that use it (`used_by`). Upload (multipart `file`) or import (`{"url"}`), set alt text. `DELETE` is refused while a post that has not gone out still uses the file |
+| `GET, POST /media/generate` | `GET` answers `{"available", "remaining", "limit", "model", "resets_at"}`: whether images can be generated and how many are left today. `POST` takes `{"prompt", "shape"}` (`shape` is `square`, `portrait` or `landscape`), makes one image with your OpenAI key and answers `{"media", "remaining", "limit", "resets_at"}`. See [Image generation](#image-generation) |
 | `GET, POST /tags` · `PATCH, DELETE /tags/{id}` | Tags with how many posts carry each. `POST` and `PATCH` take `{"name"}`. `DELETE` takes the tag off its posts and deletes no post |
 | `GET, POST /groups` · `GET, PATCH, DELETE /groups/{id}` | Account groups. `POST` and `PATCH` take `{"name", "account_ids"}` |
 | `GET, POST /signatures` · `PATCH, DELETE /signatures/{id}` | Saved signatures. `POST` and `PATCH` take `{"name", "content", "default_for"}`, where `default_for` lists the accounts that offer it by default |
@@ -244,6 +249,28 @@ Deliveries are queued when the event happens and sent by the clock a few seconds
 
 Both are tested the way the connectors are: `npm run verify` runs them end to end against a stand-in feed and a stand-in receiver on this machine, and the unit tests cover the reader with sample RSS and Atom documents. Neither has been run against a live feed or a live receiver from this repository, so try a new feed in draft mode first.
 
+## Image generation
+
+Broadside can make an image from a text prompt and put it in the media library, ready to attach to a post. It uses OpenAI's Images API with a key you supply. It is off until you turn it on.
+
+**Turn it on.** Set `OPENAI_API_KEY` in the server's environment and restart Broadside. A **Generate an image** button then appears on the **Media** screen and in the composer's **Choose from library** dialog, and agents are offered a `generate_image` tool. For the local stdio server, set the key in that server's environment too. Without the key there is no button and no tool, the Media screen says in one line how to turn generation on, and Broadside sends nothing to OpenAI.
+
+**What it costs and who pays.** Every image is a request to OpenAI made with your key, and OpenAI bills the account that key belongs to at its own price for the model. Broadside adds no charge and takes no part in the billing. The prompt is sent to OpenAI, and nothing else from Broadside is. A prompt OpenAI refuses, a key it rejects and a request that fails are not counted against the daily limit; whether OpenAI charges for them is between you and OpenAI.
+
+**The daily limit.** `BROADSIDE_IMAGE_DAILY_LIMIT` is how many images may be made per day, counted in UTC, across every person, every API key and every agent on the install. The default is 20. Set it to `0` to turn generation off while leaving the key in place. A value that is not a whole number is read as `0`. A place is taken before OpenAI is asked and given back if no image comes back, so requests arriving at the same moment cannot go over. When the limit is reached, the answer says so and when the count starts again. Deleting a generated image does not give its place back, because it was already billed. The limit counts images, not money: the cost of one image depends on the model.
+
+**The model and the shapes.** The model is `gpt-image-2.6-flare` unless `BROADSIDE_IMAGE_MODEL` names another. You choose a shape: square (1024x1024), portrait (1024x1536) or landscape (1536x1024). A prompt is 1 to 2,000 characters, and a longer one is refused, never cut. OpenAI may take up to two minutes; Broadside stops waiting after three.
+
+**In the app.** The dialog shows how many images are left today before you press Generate. While it works you can stop waiting; that does not stop OpenAI, so the image may still arrive in the library and count. When the image is back you can use it, try again (a new image from the same prompt, which counts again and leaves the first in the library) or discard it (the file is deleted and still counts). Its description starts as the prompt and is yours to change.
+
+**Roles.** Generating needs the editor role, by session, by API key and over MCP. A viewer can read whether generation is available and how many are left, and has no button.
+
+**Agents.** `generate_image` is listed only when generation is available. Its description says each call is billed to the operator's OpenAI account and counts against the daily limit, and it returns a media id to pass to `create_post`. It draws on the same count as the app. `BROADSIDE_MCP_DRAFTS_ONLY` does not block it: that setting is about publishing, and generating an image publishes nothing. If you do not want agents to spend your images, give them a viewer key or leave the key off the server they connect to.
+
+**What is stored.** The image file goes through the same checks as an upload: its type is read from its bytes, the upload size limit applies, and it is served with the same sandboxing. Beside the file Broadside keeps that it was generated, the prompt, the model and, in a team, who asked for it. One row per image records the day it counted against. The key is read from the environment when it is used. It is never written to the database, returned by the API, shown to the browser, given to an agent or written to the log, and an error message from OpenAI that quotes the key is never passed on.
+
+This was built from OpenAI's documentation as it read on 15 November 2026 and is tested against a stand-in on this machine: the unit tests and `npm run verify` check the request Broadside sends, each kind of refusal, the limit under parallel requests and that the key appears in no response or log line. It has not been run against OpenAI itself from this repository.
+
 ## Teams
 
 Broadside starts with one operator and stays that way until you decide otherwise. An install that never adds a member works exactly as described above, with nothing new to set up. A team lets several people use one install, each with their own name, their own password and a role.
@@ -291,6 +318,8 @@ A member changes their own password on the Team screen by typing the current one
 | Analytics | Ask the networks for a post's numbers now (`/analytics/refresh`) | editor |
 | Media | List the library | viewer |
 | Media | Upload, import by link, set alt text, delete | editor |
+| Media | Read whether images can be generated and how many are left today | viewer |
+| Media | Generate an image from a prompt | editor |
 | Tags, groups, signatures | List | viewer |
 | Tags, groups, signatures | Create, change, delete; set an account's default signature | editor |
 | Accounts | List accounts and networks | viewer |
@@ -307,7 +336,7 @@ A member changes their own password on the Team screen by typing the current one
 
 The line is drawn once, in the wrapper every API route goes through, and each route declares the least role that may call it. `npm run check:routes`, which `npm run verify` runs, fails for a route that declares none. The screens leave out what a member cannot do, and the API refuses it whatever a screen shows.
 
-Over MCP: `list_platforms`, `list_accounts`, `list_media`, `list_tags`, `list_groups`, `list_signatures`, `check_post`, `get_post`, `list_posts`, `get_analytics`, `get_post_analytics`, `list_feeds` and `list_outgoing_webhooks` need viewer. `upload_media`, `create_post`, `update_post`, `publish_post`, `cancel_post`, `stop_series`, `retry_target` and `delete_post` need editor. `connect_account` and `disconnect_account` need admin. `BROADSIDE_MCP_DRAFTS_ONLY` applies on top of this: with it set, no role lets an agent publish.
+Over MCP: `list_platforms`, `list_accounts`, `list_media`, `list_tags`, `list_groups`, `list_signatures`, `check_post`, `get_post`, `list_posts`, `get_analytics`, `get_post_analytics`, `list_feeds` and `list_outgoing_webhooks` need viewer. `upload_media`, `generate_image`, `create_post`, `update_post`, `publish_post`, `cancel_post`, `stop_series`, `retry_target` and `delete_post` need editor. `connect_account` and `disconnect_account` need admin. `BROADSIDE_MCP_DRAFTS_ONLY` applies on top of this: with it set, no role lets an agent publish. It does not stop `generate_image`, which publishes nothing.
 
 ### API keys in a team
 
@@ -345,7 +374,10 @@ npm run members -- leave-team --yes  # remove every member and go back to one op
 | `BROADSIDE_DATA_DIR` | Where the database, uploads and encryption key live. Default `./data`. Back this folder up. |
 | `BROADSIDE_SECRET` | Key material for encrypting credentials and signing sessions. Default: a key file created in the data folder. |
 | `BROADSIDE_API_KEY` | A fixed API key for headless installs. In a team it works as an editor that belongs to no one. Set in the stdio server's environment to a member's key, it makes that server act as that member. |
-| `BROADSIDE_MCP_DRAFTS_ONLY` | Set to `1` and agents can prepare posts but only a person can publish them, from the app. |
+| `BROADSIDE_MCP_DRAFTS_ONLY` | Set to `1` and agents can prepare posts but only a person can publish them, from the app. It does not stop an agent generating an image. |
+| `OPENAI_API_KEY` | Your OpenAI key. Setting it turns [image generation](#image-generation) on; every image is billed to that OpenAI account. Unset, the feature is off and nothing is sent to OpenAI. |
+| `BROADSIDE_IMAGE_MODEL` | The OpenAI image model to use. Default `gpt-image-2.6-flare`. |
+| `BROADSIDE_IMAGE_DAILY_LIMIT` | Images that may be generated per UTC day, across everyone and every key. Default 20. `0` turns generation off even with a key. |
 | `BROADSIDE_ALLOW_PRIVATE_FETCH` | Set to `1` to let Broadside call addresses on your own network, such as an n8n webhook on localhost or a Mastodon instance on your LAN. |
 | `BROADSIDE_TICK_MS` | How often the scheduler looks for due posts. Default 5000. |
 | `BROADSIDE_MAX_UPLOAD_MB` | Largest accepted upload. Default 512. |
@@ -372,6 +404,8 @@ Outgoing webhooks send your posts to an address, so they are made by a person, i
 
 Signing in with a network starts from the app or from an API key, never from another site. A pending sign-in is one encrypted row that works once and is gone after ten minutes, and the callback connects nothing for a state value this Broadside did not issue. Where the network supports PKCE (X, TikTok) it is used. The app's secret is sent to the network in a request body or a Basic header, never in an address. Only what posting needs is kept afterwards: for Facebook, Instagram and Threads that is one token, and the app's secret is discarded. A choice of Pages or boards waits in a second row of the same kind, and the browser is shown names, never tokens.
 
+The OpenAI key for image generation stays in the server's environment. It is sent to `api.openai.com` as a Bearer token and nowhere else: the request goes through the same guard as every outbound call, and a redirect is refused, on the same host or another. It is not stored, returned, shown or logged. OpenAI answers a rejected key with a message that quotes it, so that message is dropped and Broadside says in its own words that the key was refused; any other text from OpenAI that is shown has the key and anything shaped like one taken out first. A prompt is text a person or an agent typed and a generated image is a file from a third party: the prompt is only ever shown as text, and the image is checked by its bytes and served sandboxed like any upload.
+
 Agents see text that other people control: account names, error messages from networks, links, and the titles and text that come from feeds. The MCP server tells agents to treat those as data. A draft made from a feed can be edited by an agent and published only by a person, whatever the mode. If you would rather an agent could never publish on its own, set `BROADSIDE_MCP_DRAFTS_ONLY=1`.
 
 Known limits:
@@ -388,6 +422,9 @@ Known limits:
 - The private-address check resolves a name before connecting to it, so a hostile DNS server that changes its answer between the two could still get through. It narrows that hole and does not close it.
 - A few networks (Threads, Instagram, Facebook) take the access token in the URL, as their APIs require.
 - An upload is held in memory while it is checked, so the size limit is also a memory limit.
+- The image limit counts images per UTC day, not money, and it is one number for the whole install: there is no allowance per member or per key. Anyone with the editor role, and any agent with an editor key, can use it up.
+- Stopping the wait for an image does not cancel it at OpenAI. The image may still be made, billed and added to the library.
+- Prompts are sent to OpenAI under your key and are subject to OpenAI's terms and retention, not Broadside's.
 - There is no audit log yet beyond the post history.
 
 To put Broadside on the internet, keep it on `127.0.0.1` and publish it through a tunnel with an access layer in front (Cloudflare Tunnel with an Access application, for example), allowing `/media/*` through so networks can fetch your media, and keep `BROADSIDE_PASSWORD` set as well. This layout is the recommendation from a security review of the code; the exact tunnel settings were not tested here.
@@ -401,6 +438,7 @@ To put Broadside on the internet, keep it on `127.0.0.1` and publish it through 
 - `src/lib/analytics.ts` reads numbers back. A connector's optional `metrics` function asks its network for one post's counts and returns only what the network answered, each under the network's own word. Every reading is stored with its time, and numbers that repeat the reading before move that time on instead of adding a row; a failed one leaves the last good row in place and records the reason. A target is claimed with a compare-and-set before it is read, so two clocks never ask twice, and a 429 pauses that account until the network's wait is over. The scheduler runs this beside publishing and waits for neither.
 - `src/lib/outgoing.ts` holds outgoing webhooks. The engine queues one row per webhook when something happens and does nothing else, so it never waits for a receiver; the scheduler sends what is queued, signs each try afresh, retries with a growing wait and pauses a webhook that keeps failing. A delivery is claimed with a compare-and-set before it is sent.
 - `src/lib/feeds.ts` reads feeds and `src/lib/feed-parse.ts` is the XML reader, written from the RSS and Atom specifications with no parser dependency. An item is remembered before its post is made, so a crash between the two skips the item and can never post it twice.
+- `src/lib/images.ts` is image generation: one request to OpenAI's images endpoint, written from its documentation (the pages and the date are at the top of the file), with an injectable `fetch` so it is tested with a fake. The daily limit is one `INSERT … WHERE (SELECT COUNT(*)) < ?`, so a place is taken or refused in a single statement. The picture is then handed to `saveMedia` like any upload.
 - `src/lib/mcp.ts` defines the tools once; `/mcp` (HTTP) and `bin/broadside-mcp.ts` (stdio) both serve them. Every tool is registered through one check against `TOOL_ROLES`, and a tool with no role in that table cannot be registered.
 - `src/lib/members.ts` holds the team: members, password hashing, invites and the rules for who may change whom. `src/lib/actor.ts` answers one question for every request, who is asking and with what role, from the database each time. `src/lib/http.ts` wraps every route: `route({ role }, handler)` checks the caller against the role the route declares and hands the handler that actor, and `open("why", handler)` marks the few routes meant for anyone. `scripts/check-routes.mjs` fails for a route file that uses neither.
 - `src/lib/scheduler.ts` is an in-process clock started with the server.

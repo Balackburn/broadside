@@ -32,6 +32,9 @@ function ok(condition, label, detail = "") {
 
 // verify builds into its own folder, so a Broadside already running from .next keeps working.
 process.env.BROADSIDE_DIST_DIR = ".next-verify";
+// Whatever the shell that runs verify holds for image generation is dropped unread. No step and no server below can use a real key:
+// the one server that generates is handed a made-up key, and its requests for api.openai.com go to the stand-in.
+for (const name of ["OPENAI_API_KEY", "BROADSIDE_IMAGE_MODEL", "BROADSIDE_IMAGE_DAILY_LIMIT"]) delete process.env[name];
 
 function step(title, command, args) {
   console.log(`\n▸ ${title}`);
@@ -59,6 +62,9 @@ const numbersDown = new Set();
 // Automations: a feed whose items change while the test runs, and a receiver for outgoing webhooks that can be told to misbehave.
 const standinFeed = { version: 1, items: [], raw: null, reads: [] };
 const receiver = { mode: "ok", requests: [], elsewhere: [], held: [] };
+// Image generation: a made-up key, different every run and never printed, and every request the stand-in for OpenAI was sent.
+const IMAGE_KEY = `sk-verify-standin-${randomBytes(24).toString("hex")}`;
+const imageRequests = [];
 const feedXml = () =>
   `<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel><title>Verify Journal</title><link>https://journal.example/</link>${standinFeed.items
     .map((item) => `<item><title>${item.title}</title>${item.link ? `<link>${item.link}</link>` : ""}<guid isPermaLink="false">${item.guid}</guid>${item.date ? `<pubDate>${new Date(item.date).toUTCString()}</pubDate>` : ""}<description>${item.description ?? ""}</description></item>`)
@@ -189,6 +195,21 @@ function networks() {
         receiver.elsewhere.push({ headers: req.headers, body: text });
         res.writeHead(200);
         return res.end("ok");
+      }
+      // OpenAI's images endpoint, as its reference describes it: a Bearer key, a JSON body, and one picture back as base64.
+      if (url === "/api.openai.com/v1/images/generations") {
+        const asked = parsed();
+        const entry = { method: req.method, authorization: req.headers.authorization ?? null, contentType: req.headers["content-type"] ?? null, body: asked, served: false };
+        imageRequests.push(entry);
+        // A refused key is answered the way OpenAI answers one: with the key in the message.
+        if (entry.authorization !== `Bearer ${IMAGE_KEY}` || String(asked.prompt).includes("[wrong key]")) {
+          return json({ error: { message: `Incorrect API key provided: ${IMAGE_KEY}. You can find your API key at https://platform.openai.com/account/api-keys.`, type: "invalid_request_error", param: null, code: "invalid_api_key" } }, 401);
+        }
+        if (String(asked.prompt).includes("[refuse]")) {
+          return json({ error: { message: "The stand-in will not draw that.", type: "image_generation_user_error", code: "moderation_blocked", moderation_details: { moderation_stage: "input", categories: ["violence"] } } }, 400);
+        }
+        entry.served = true;
+        return json({ created: Math.floor(Date.now() / 1000), data: [{ b64_json: PNG.toString("base64") }], output_format: asked.output_format, size: asked.size });
       }
       // The networks that sign in. They live at fixed addresses, so scripts/standin-fetch.mjs sends them here as /<host>/<path>.
       const signedIn = signInNetworks(req, url, new URLSearchParams(text), parsed);
@@ -735,6 +756,20 @@ try {
   ok((await via("DELETE", `/media/${newer.id}`)).status === 200, "REST: media no post uses is deleted");
   const composePage = await page("/app");
   ok(composePage.includes("Choose from library") && composePage.includes("Add media"), "The composer offers Choose from library beside Add media");
+
+  // Image generation, on a server with no OPENAI_API_KEY: nothing to press, nothing offered to agents, nothing sent
+  const noKeyStatus = await via("GET", "/media/generate");
+  const noKeyTry = await via("POST", "/media/generate", { prompt: "a lighthouse", shape: "square" });
+  ok(
+    noKeyStatus.status === 200 && noKeyStatus.body.data.available === false && noKeyStatus.body.data.remaining === 0 && noKeyTry.status === 400 && /Set OPENAI_API_KEY on the server/.test(noKeyTry.body.error.message) && !tools.includes("generate_image") && imageRequests.length === 0,
+    "With no OPENAI_API_KEY, image generation says it is unavailable, a request to generate is refused with what to set, agents are not offered generate_image, and nothing is sent to OpenAI",
+    JSON.stringify([noKeyStatus.body, noKeyTry.body]),
+  );
+  const noKeyPage = await page("/app/media");
+  ok(
+    !noKeyPage.includes("Generate an image") && noKeyPage.includes("Images can also be generated from a prompt") && noKeyPage.includes("OPENAI_API_KEY") && noKeyPage.includes('href="https://github.com/Balackburn/broadside#image-generation"'),
+    "With no key the media page has no Generate button, and one line says how to turn generation on, with a link to the README",
+  );
 
   // Tags
   const tagged = await via("POST", "/posts", { content: "verify: a tagged post", targets: [{ account_id: ids.sandbox }], tags: ["Verify Launch", "verify weekly"], publish_at: inAnHour() });
@@ -1497,7 +1532,12 @@ try {
   app.kill("SIGTERM");
   const lockedPort = port + 1;
   const locked = `http://127.0.0.1:${lockedPort}`;
-  app = spawn("npx", ["next", "start", "-p", String(lockedPort), "-H", "127.0.0.1"], { cwd: root, env: { ...env, BROADSIDE_PASSWORD: "correct horse", BROADSIDE_LOGIN_DELAY_MS: "20" }, stdio: "ignore" });
+  // This server is also the one that generates images: it holds the made-up key and a cap of four, and everything it logs is kept to be searched for that key.
+  const imageEnv = { OPENAI_API_KEY: IMAGE_KEY, BROADSIDE_IMAGE_DAILY_LIMIT: "4" };
+  app = spawn("npx", ["next", "start", "-p", String(lockedPort), "-H", "127.0.0.1"], { cwd: root, env: { ...env, ...imageEnv, BROADSIDE_PASSWORD: "correct horse", BROADSIDE_LOGIN_DELAY_MS: "20" }, stdio: ["ignore", "pipe", "pipe"] });
+  let lockedLog = "";
+  app.stdout.on("data", (d) => (lockedLog += d));
+  app.stderr.on("data", (d) => (lockedLog += d));
   await until(async () => (await fetch(`${locked}/api/health`)).ok, "the password-protected server", 60000);
   const gate = await fetch(`${locked}/app`, { redirect: "manual" });
   ok(gate.status === 307 && gate.headers.get("location").includes("/login"), "With a password set, the app sends visitors to sign in");
@@ -1758,6 +1798,142 @@ try {
     );
     const adminConnect = await team("/app/connect", { cookie: people.Ada.cookie });
     ok(adminConnect.text.includes("read only agent") && adminConnect.text.includes("Ada, viewer") && adminConnect.text.includes("Role for the key") && !adminConnect.text.includes(viewerKey), "An admin's Connect screen shows each key with its owner and role, and never a token");
+
+    // Image generation, on the server that holds a key: the stand-in plays OpenAI, and the cap here is four a day
+    {
+      const said = [];
+      const gen = async (options) => {
+        const answer = await team("/api/v1/media/generate", options);
+        said.push(answer.text);
+        return answer;
+      };
+      const generate = (who, prompt, shape) => gen({ method: "POST", ...who, body: { prompt, shape } });
+      const eddie = { cookie: people.Eddie.cookie };
+      const vic = { cookie: people.Vic.cookie };
+
+      const viewerStatus = await gen(vic);
+      ok(
+        viewerStatus.status === 200 && JSON.stringify(Object.keys(viewerStatus.body.data).sort()) === JSON.stringify(["available", "limit", "model", "remaining", "resets_at"]) && viewerStatus.body.data.available === true && viewerStatus.body.data.remaining === 4 && viewerStatus.body.data.limit === 4 && viewerStatus.body.data.model === "gpt-image-2.6-flare" && /T00:00:00\.000Z$/.test(viewerStatus.body.data.resets_at),
+        "With a key set, anyone signed in can read that generation is available, the model, and that 4 of 4 images are left today, and nothing else",
+        viewerStatus.text,
+      );
+      const viewerTries = await generate(vic, "a viewer asks for a picture", "square");
+      const viewerKeyTries = await generate({ key: viewerKey, site: null }, "a viewer key asks for a picture", "square");
+      const viewerMedia = await team("/app/media", vic);
+      const editorMedia = await team("/app/media", eddie);
+      said.push(viewerMedia.text, editorMedia.text);
+      ok(
+        refused(viewerTries) && /This needs the editor role\. You have viewer\./.test(viewerTries.body.error.message) && refused(viewerKeyTries) && /This key has viewer/.test(viewerKeyTries.body.error.message) && imageRequests.length === 0 && !viewerMedia.text.includes("Generate an image") && !viewerMedia.text.includes("OPENAI_API_KEY") && editorMedia.text.includes("Generate an image") && !editorMedia.text.includes("Images can also be generated from a prompt"),
+        "A viewer cannot generate, by session or by key, and nothing is sent for them; their media page has no Generate button, and an editor's has one",
+      );
+
+      const prompt = "Verify: a lighthouse at dusk, in gouache";
+      const made = await generate(eddie, `  ${prompt}  `, "landscape");
+      const sent = imageRequests.at(-1);
+      ok(
+        made.status === 200 && /^med_/.test(made.body.data.media.id) && made.body.data.media.origin === "generated" && made.body.data.media.prompt === prompt && made.body.data.media.alt === prompt && made.body.data.media.model === "gpt-image-2.6-flare" && made.body.data.media.made_by === "Eddie" && made.body.data.media.content_type === "image/png" && made.body.data.remaining === 3 && made.body.data.limit === 4,
+        "An editor generates an image: it comes back as a media item marked generated, with its prompt, its model, who made it, the prompt as its description, and 3 left today",
+        made.text,
+      );
+      ok(
+        imageRequests.length === 1 && sent.method === "POST" && sent.authorization === `Bearer ${IMAGE_KEY}` && sent.contentType === "application/json" && JSON.stringify(sent.body) === JSON.stringify({ model: "gpt-image-2.6-flare", prompt, size: "1536x1024", n: 1, output_format: "jpeg" }),
+        "OpenAI's stand-in was sent one POST with the key as a Bearer token and exactly the documented body: model, the trimmed prompt, 1536x1024 for landscape, one image",
+        JSON.stringify(sent.body),
+      );
+      const generated = made.body.data.media;
+      const file = await fetch(`${locked}${generated.url}`);
+      const library = await team("/api/v1/media", vic);
+      const libraryPageNow = await team("/app/media", eddie);
+      said.push(library.text, libraryPageNow.text);
+      ok(
+        file.status === 200 && file.headers.get("content-type") === "image/png" && file.headers.get("content-security-policy") === "default-src 'none'; sandbox" && Buffer.from(await file.arrayBuffer()).equals(PNG) && library.body.data[0].id === generated.id && library.body.data[0].origin === "generated" && library.body.data[0].used_by.length === 0 && libraryPageNow.text.includes("Generated by Eddie") && libraryPageNow.text.includes(prompt) && libraryPageNow.text.includes("Prompt:"),
+        "The picture is stored by what its bytes are and served sandboxed like any upload; the library lists it first, marked Generated with who made it and its prompt",
+      );
+      const described = await team(`/api/v1/media/${generated.id}`, { method: "PATCH", ...eddie, body: { alt: "A lighthouse, painted" } });
+      const withPicture = await team("/api/v1/posts", { method: "POST", ...eddie, body: { content: "verify: a post with a generated picture", targets: [{ account_id: ids.sandbox }], media_ids: [generated.id] } });
+      said.push(described.text, withPicture.text);
+      ok(
+        described.body.data.alt === "A lighthouse, painted" && described.body.data.prompt === prompt && withPicture.status === 200 && withPicture.body.data.status === "published" && withPicture.body.data.media[0].id === generated.id && withPicture.body.data.media[0].origin === "generated" && (await team("/api/v1/media", vic)).body.data[0].used_by[0].post_id === withPicture.body.data.id,
+        "Its description can be changed while the prompt stays, and it is attached to a post and published like any other file",
+        withPicture.text,
+      );
+
+      // Refusals: each says what happened, none of them counts, and none repeats the key
+      const before = imageRequests.length;
+      const notDrawn = await generate(eddie, "[refuse] something the stand-in will not draw", "square");
+      const keyRefused = await generate(eddie, "[wrong key] the stand-in answers as if the key were wrong", "square");
+      const tooLong = await generate(eddie, "p".repeat(2001), "square");
+      const noPrompt = await generate(eddie, "   ", "square");
+      const badShape = await generate(eddie, "a circle, please", "circle");
+      const afterRefusals = await gen(eddie);
+      ok(
+        refused(notDrawn, 400) && notDrawn.body.error.message === 'OpenAI refused this prompt. It said: "The stand-in will not draw that." Change the prompt and try again.' && notDrawn.body.error.details.stage === "input" && refused(keyRefused, 400) && keyRefused.body.error.message === "The key in OPENAI_API_KEY was refused by OpenAI. Check the key on the server, then restart Broadside." && imageRequests.length === before + 2,
+        "A prompt OpenAI refuses is answered in OpenAI's own words, and a refused key in Broadside's, without the answer that quotes the key",
+        JSON.stringify([notDrawn.body, keyRefused.status]),
+      );
+      ok(
+        refused(tooLong, 400) && /The prompt is 2001 characters/.test(tooLong.body.error.message) && refused(noPrompt, 400) && refused(badShape, 400) && /square, portrait or landscape/.test(badShape.body.error.message) && imageRequests.length === before + 2 && afterRefusals.body.data.remaining === 3,
+        "A prompt that is too long or empty, and a shape that is not one of the three, are refused before anything is sent; no refusal used up one of today's images",
+        JSON.stringify(afterRefusals.body),
+      );
+
+      // Agents: the tool is offered here, checks the role, and draws on the same count
+      const writerTools = (await writer.listTools()).tools;
+      const offeredTool = writerTools.find((t) => t.name === "generate_image");
+      const readerGenerate = await reader.callTool({ name: "generate_image", arguments: { prompt: "a viewer key, over MCP" } });
+      const agentMade = await writer.callTool({ name: "generate_image", arguments: { prompt: "Verify: an owl, drawn in ink", shape: "portrait" } });
+      said.push(JSON.stringify(writerTools), JSON.stringify(readerGenerate), JSON.stringify(agentMade));
+      const agentImage = result(agentMade);
+      ok(
+        Boolean(offeredTool) && /billed to the OpenAI account of whoever runs this Broadside/.test(offeredTool.description) && /counts against a daily cap/.test(offeredTool.description) && /media_ids on create_post/.test(offeredTool.description) && readerGenerate.isError === true && /generate_image needs the editor role, and this key has viewer/.test(readerGenerate.content[0].text),
+        "Over MCP generate_image is offered, says each call is billed to the operator and counts against the cap, and is refused to a viewer key",
+      );
+      const agentPost = result(await writer.callTool({ name: "create_post", arguments: { content: "verify: an agent's generated picture", targets: [{ account_id: ids.sandbox }], media_ids: [agentImage.media_id], draft: true } }));
+      ok(
+        !agentMade.isError && /^med_/.test(agentImage.media_id) && agentImage.media.origin === "generated" && agentImage.media.made_by === "Ada" && agentImage.remaining_today === 2 && agentImage.daily_limit === 4 && imageRequests.at(-1).body.size === "1024x1536" && agentPost.media[0].id === agentImage.media_id,
+        "An editor key generates over MCP as its owner, the reply carries the media id and that 2 are left, and create_post takes that id",
+        agentMade.content[0].text,
+      );
+
+      // The cap: two left, four asked for at the same moment
+      const served = () => imageRequests.filter((r) => r.served).length;
+      const rush = await Promise.all(["one", "two", "three", "four"].map((n) => generate(eddie, `Verify: parallel ${n}`, "square")));
+      const through = rush.filter((r) => r.status === 200);
+      const stopped = rush.filter((r) => r.status === 400);
+      ok(
+        through.length === 2 && stopped.length === 2 && served() === 4 && stopped.every((r) => /^Today's 4 images have been generated\. The count starts again at 00:00 UTC\./.test(r.body.error.message) && r.body.error.details.remaining === 0 && /T00:00:00\.000Z$/.test(r.body.error.details.resets_at)),
+        "Four requests arriving together for the last two images get exactly two; the others are told the day's four are used and when the count starts again",
+        JSON.stringify(rush.map((r) => [r.status, r.body.error?.message])),
+      );
+      const atCap = imageRequests.length;
+      const agentOver = await writer.callTool({ name: "generate_image", arguments: { prompt: "one more, over MCP" } });
+      // A second process with the same data folder and the key: the stdio server. It is offered the tool and held to the same count.
+      const stdioImages = await stdio(imageEnv);
+      const stdioOffered = (await stdioImages.listTools()).tools.some((t) => t.name === "generate_image");
+      const stdioOver = await stdioImages.callTool({ name: "generate_image", arguments: { prompt: "one more, over stdio" } });
+      await stdioImages.close();
+      said.push(JSON.stringify(agentOver), JSON.stringify(stdioOver));
+      // Deleting a generated picture does not hand its place back: it was billed.
+      const discarded = await team(`/api/v1/media/${through[0].body.data.media.id}`, { method: "DELETE", ...eddie });
+      const overAgain = await generate(eddie, "after deleting one", "square");
+      const fullStatus = await gen(vic);
+      ok(
+        agentOver.isError === true && /Today's 4 images have been generated/.test(agentOver.content[0].text) && stdioOffered && stdioOver.isError === true && /Today's 4 images have been generated/.test(stdioOver.content[0].text) && discarded.status === 200 && refused(overAgain, 400) && fullStatus.body.data.remaining === 0 && fullStatus.body.data.available === true && imageRequests.length === atCap && served() === 4,
+        "At the cap the next image is refused over HTTP, over MCP and from the stdio server alike, deleting a generated file frees nothing, and OpenAI is not asked again",
+        JSON.stringify([agentOver.content[0].text, fullStatus.body]),
+      );
+
+      // The key: in the request to OpenAI and nowhere else
+      const stored = new DatabaseSync(path.join(dataDir, "broadside.db"), { readOnly: true });
+      const kept = JSON.stringify([stored.prepare("SELECT * FROM media").all(), stored.prepare("SELECT * FROM image_generations").all()]);
+      const counted = stored.prepare("SELECT COUNT(*) AS n FROM image_generations WHERE status = 'done'").get().n;
+      stored.close();
+      const everyAnswer = said.join("\n");
+      ok(
+        imageRequests.every((r) => r.authorization === `Bearer ${IMAGE_KEY}`) && everyAnswer.length > 5000 && !everyAnswer.includes(IMAGE_KEY) && !/sk-verify-standin/.test(everyAnswer) && lockedLog.length > 0 && !lockedLog.includes(IMAGE_KEY) && !/sk-verify-standin/.test(lockedLog) && !kept.includes(IMAGE_KEY) && counted === 4,
+        "The key reached the stand-in on every request and appears in no response body, no page, no MCP reply, no line of the server's log and no row of the database",
+      );
+    }
 
     // A role change holds from the next request
     const demote = await team(`/api/v1/team/members/${idOf("Eddie")}`, { method: "PATCH", cookie: ownerCookie, body: { role: "viewer" } });

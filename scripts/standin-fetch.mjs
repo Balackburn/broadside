@@ -18,6 +18,8 @@ if (standin) {
     "oauth2.googleapis.com",
     "www.googleapis.com",
     "api.pinterest.com",
+    // Image generation. With this file loaded, no request for OpenAI leaves the machine, whatever key the server holds.
+    "api.openai.com",
   ]);
   const real = globalThis.fetch;
   globalThis.fetch = (input, init) => {
