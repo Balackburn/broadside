@@ -39,3 +39,8 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Broadside data: database, uploaded media, encryption key
+/data
+.hallmark
+.taste-skill

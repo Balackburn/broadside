@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 56" role="img" aria-label="Broadside">
+  <g transform="translate(4 6) scale(1.5)">
+    <rect x="10" y="4" width="12" height="18" rx="2" fill="#16181d" opacity=".28" transform="rotate(-26 16 30)"/>
+    <rect x="10" y="4" width="12" height="18" rx="2" fill="#16181d" transform="rotate(26 16 30)"/>
+    <rect x="10" y="4" width="12" height="18" rx="2" fill="#e5391f"/>
+  </g>
+  <text x="62" y="40" font-family="'Bricolage Grotesque','Helvetica Neue',Arial,sans-serif" font-weight="800" font-size="34" letter-spacing="-1.2" fill="#16181d">Broadside</text>
+</svg>
