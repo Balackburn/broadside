@@ -53,6 +53,8 @@ BROADSIDE_HOST=0.0.0.0 BROADSIDE_PASSWORD='choose-something' BROADSIDE_PUBLIC_UR
 
 It refuses to listen on a network without a password.
 
+One person can run all of this alone. To let other people in with their own sign-in and their own limits, see [Teams](#teams).
+
 For development: `npm run dev`. To prove the whole thing works end to end: `npm run verify`.
 
 ## Connect an agent
@@ -76,6 +78,8 @@ Tools: `list_platforms`, `list_accounts`, `list_groups`, `connect_account`, `dis
 `list_feeds` and `list_outgoing_webhooks` are read-only, and there is no tool that adds, changes, checks or deletes a feed or an outgoing webhook: either could send your posts somewhere or publish words you did not write, so they are set up by a person in the app. An agent sees the site an outgoing webhook calls, never its full address or its secret. `list_posts` takes `origin` and `feed_id` to find the posts a feed made. An agent can edit a draft made from a feed and cannot publish it.
 
 `create_post` and `update_post` take `tags`, and `group_id` in place of `targets` to post to a saved group. `check_post` takes `group_id` too, and `list_posts` filters by `tag`. A signature is text: an agent that wants one reads it from `list_signatures` and puts it at the end of the post itself.
+
+On an install with a [team](#teams), a key has a role and each tool needs one: a viewer's key can list and read, an editor's can also write and publish, and only an admin's can connect or disconnect an account. A tool called with too low a role answers with the role it needs and does nothing.
 
 ## REST API
 
@@ -110,9 +114,13 @@ Add `"tags": ["launch", "weekly"]` to tag a post; a tag that does not exist yet 
 | `POST /feeds/{id}/check` · `/test` | `check` reads the feed now and makes posts from what is new. `test` is a dry run: the post the newest item would make and whether it fits, with nothing saved or sent |
 | `GET, POST /outgoing-webhooks` · `GET, PATCH, DELETE /outgoing-webhooks/{id}` | Outgoing webhooks. `POST` takes `{"name", "url", "events"}` and answers with the signing `secret`, this once. `PATCH` takes the same fields and `{"paused": true}` or `false`. Each comes back with its latest `deliveries` |
 | `POST /outgoing-webhooks/{id}/test` | Sends a signed test delivery now and returns how the receiver answered |
-| `GET, POST /keys` · `DELETE /keys/{id}` | API keys |
+| `GET, POST /keys` · `DELETE /keys/{id}` | API keys. In a team, `POST` also takes `{"role"}`, and each key comes back with `member_id`, `role` and its `owner`'s name |
+| `GET, POST /team` | The team as the person asking may see it: `team`, `me`, `members`, and for admins the `invites` still waiting. `POST` takes `{"name", "password"}` and starts a team, once |
+| `POST /team/invites` · `DELETE /team/invites/{id}` | Invite someone with `{"name", "role"}`; the reply holds the one-time link, this once. `DELETE` withdraws it |
+| `PATCH, DELETE /team/members/{id}` | `{"role"}`, or `{"disabled": true}` or `false`. `DELETE` removes the member and their API keys; the posts they wrote stay |
+| `POST /team/password` | A member changes their own password with `{"current", "next"}` |
 
-Responses are `{ "data": … }` or `{ "error": { "code", "message", "details" } }`.
+Responses are `{ "data": … }` or `{ "error": { "code", "message", "details" } }`. A call the caller's role does not allow answers 403 with the code `forbidden` and the role it needs. The `/team` routes answer only to a person signed in to the app, never to an API key, and say so with the code `needs_person`. The [Teams](#teams) section lists the role each route asks for.
 
 ## Networks and what you bring
 
@@ -236,18 +244,107 @@ Deliveries are queued when the event happens and sent by the clock a few seconds
 
 Both are tested the way the connectors are: `npm run verify` runs them end to end against a stand-in feed and a stand-in receiver on this machine, and the unit tests cover the reader with sample RSS and Atom documents. Neither has been run against a live feed or a live receiver from this repository, so try a new feed in draft mode first.
 
+## Teams
+
+Broadside starts with one operator and stays that way until you decide otherwise. An install that never adds a member works exactly as described above, with nothing new to set up. A team lets several people use one install, each with their own name, their own password and a role.
+
+### Roles
+
+Each role can do everything the ones below it can.
+
+| Role | Can |
+| --- | --- |
+| `viewer` | Read everything in the app: posts, the calendar, analytics, media, the accounts list, feeds and outgoing webhooks. Change nothing |
+| `editor` | Write, schedule, publish, cancel and retry posts. Upload and delete media. Manage tags, groups and signatures |
+| `admin` | Connect and remove network accounts. Make and revoke API keys. Add and change feeds and outgoing webhooks. Invite people, and disable, remove or change the role of editors and viewers |
+| `owner` | Everything, including admins and other owners |
+
+There is always at least one owner who can sign in: the last one cannot be disabled, demoted or removed, by anyone, themselves included. Nobody changes their own role or disables themselves. An admin can hand out a role up to admin, and cannot touch an owner or another admin.
+
+### Start a team
+
+Open **Team** in the app, type the name you want to sign in with and a password of at least 12 characters, and press **Set up a team**. You become the owner. That request is allowed the same way every request was until then: from this machine when there is no password, or from a session the shared password started.
+
+From that moment:
+
+- Everyone signs in with their own name and password, on this machine too, even with no `BROADSIDE_PASSWORD` set.
+- `BROADSIDE_PASSWORD` no longer signs anyone in. `npm start` still asks for it before it will listen on a network: if the team is ever dissolved, the install falls back to that password and is never left open.
+- Posts say who wrote them, in the Posts list and on each post.
+
+### Invite people
+
+An owner or an admin presses **Invite someone**, types a name and picks a role no higher than their own. Broadside shows a link, once. Send it to that person somewhere private. They open it, choose their own password, and are signed in.
+
+There is no email. The link holds 32 random bytes, only a hash of it is stored, it works once and it runs out after seven days. Whoever has the link can use it, so treat it like a password until it has been used. An admin never sees or sets anyone else's password. Invites that are still waiting are listed on the Team screen with **Revoke** beside each, and an invite is withdrawn by itself if whoever made it is disabled, removed, or demoted below the role it gives.
+
+Names are compared without capitals or extra spaces, so `Ada`, `ada` and ` ADA ` are one member.
+
+A member changes their own password on the Team screen by typing the current one. That signs them out everywhere else.
+
+### What each role can do
+
+| Area | Action | Least role |
+| --- | --- | --- |
+| Posts | Read posts, one post, the calendar; dry-run a post with `POST /check` | viewer |
+| Posts | Create, edit, schedule, publish, cancel, stop a series, retry a target, delete from history | editor |
+| Analytics | Read stored numbers | viewer |
+| Analytics | Ask the networks for a post's numbers now (`/analytics/refresh`) | editor |
+| Media | List the library | viewer |
+| Media | Upload, import by link, set alt text, delete | editor |
+| Tags, groups, signatures | List | viewer |
+| Tags, groups, signatures | Create, change, delete; set an account's default signature | editor |
+| Accounts | List accounts and networks | viewer |
+| Accounts | Connect by pasting credentials or by signing in, pick Pages or boards, disconnect | admin |
+| API keys | List, create, revoke | admin |
+| Feeds | List, with the address cut at its query below admin | viewer |
+| Feeds | Add, change, pause, check now, preview, delete | admin |
+| Outgoing webhooks | List with their delivery logs, the address cut to its site below admin | viewer |
+| Outgoing webhooks | Add, change, pause, send a test, delete | admin |
+| Team | See the members and their roles; change your own password | viewer |
+| Team | Invite, revoke an invite, disable, enable, remove or change the role of editors and viewers | admin |
+| Team | The same for admins and owners; give the owner role | owner |
+| Team | Set up the team in the first place | the operator, before there is one |
+
+The line is drawn once, in the wrapper every API route goes through, and each route declares the least role that may call it. `npm run check:routes`, which `npm run verify` runs, fails for a route that declares none. The screens leave out what a member cannot do, and the API refuses it whatever a screen shows.
+
+Over MCP: `list_platforms`, `list_accounts`, `list_media`, `list_tags`, `list_groups`, `list_signatures`, `check_post`, `get_post`, `list_posts`, `get_analytics`, `get_post_analytics`, `list_feeds` and `list_outgoing_webhooks` need viewer. `upload_media`, `create_post`, `update_post`, `publish_post`, `cancel_post`, `stop_series`, `retry_target` and `delete_post` need editor. `connect_account` and `disconnect_account` need admin. `BROADSIDE_MCP_DRAFTS_ONLY` applies on top of this: with it set, no role lets an agent publish.
+
+### API keys in a team
+
+A key made in a team belongs to the member who made it and has a role chosen at that moment, never higher than their own. On every request the key can do the lower of that role and whatever its owner's role is now. Lower the member's role and the key drops with it; disable or remove the member and the key stops working. Posts made with a key are recorded as its owner's.
+
+Keys made before the team had no owner and could do everything. Once there is a team they keep working as **editors that belong to no one**: they can still read and post, which is what they were made for, and can no longer connect accounts, make keys or change feeds and webhooks. The Connect screen marks each as created before the team, with Revoke beside it. `BROADSIDE_API_KEY` is treated the same way. No API key of any role can add a member, change a role or set a password: the team's own routes answer only to a person signed in to the app.
+
+The local stdio server opens the data folder directly, so whoever starts it could already read and change everything in that folder; no role can bind that person. What its role limits is the agent they hand it to. With no team it is the owner, as before. In a team it works as an editor that belongs to no one, unless `BROADSIDE_API_KEY` in its environment holds a member's key, in which case it works as that key does over HTTP, and its posts are recorded as that member's.
+
+### Recovery, on the server
+
+These run on the machine that holds the data folder (`BROADSIDE_DATA_DIR`, or `./data`), with the app running or stopped. They ask for no password, because whoever can run them can already read that folder.
+
+```bash
+npm run members -- list              # every member, their role, and whether they are disabled
+npm run members -- reset <name>      # throw away a password and print a one-time link to choose a new one
+npm run members -- disable <name>    # sign a member out everywhere and stop their API keys
+npm run members -- enable <name>     # let a disabled member sign in again
+npm run members -- leave-team --yes  # remove every member and go back to one operator
+```
+
+`reset` never takes a password on the command line. It signs the member out at once and prints a link like an invite's, which they open to choose a new password. Set `BROADSIDE_PUBLIC_URL` when you run it so the link starts with this Broadside's real address. `disable` refuses the last owner; use `reset` to get an owner back in.
+
+`leave-team` removes every member and invite, and every API key a member made (a viewer's key must not come back as a key with no limits). Posts, accounts, media, automations and the keys from before the team stay, and those keys can do everything again. Afterwards the install is single-user: behind `BROADSIDE_PASSWORD` if it is set, and open on this machine if it is not.
+
 ## Configuration
 
 | Variable | Purpose |
 | --- | --- |
-| `BROADSIDE_PASSWORD` | Password for the web app. Required before Broadside will listen beyond this machine. |
+| `BROADSIDE_PASSWORD` | Password for the web app. Required before Broadside will listen beyond this machine. Once there is a [team](#teams) it signs no one in, and is still required by `npm start` for a network address. |
 | `BROADSIDE_HOST` | Address to listen on. Default `127.0.0.1`. |
 | `PORT` | Port to listen on. Default `3000`. |
 | `BROADSIDE_PUBLIC_URL` | The public address of this app. Used for media that networks fetch, for links handed to agents, and as an allowed host name. |
 | `BROADSIDE_ALLOWED_HOSTS` | Extra host names a passwordless install answers to, comma separated. |
 | `BROADSIDE_DATA_DIR` | Where the database, uploads and encryption key live. Default `./data`. Back this folder up. |
 | `BROADSIDE_SECRET` | Key material for encrypting credentials and signing sessions. Default: a key file created in the data folder. |
-| `BROADSIDE_API_KEY` | A fixed API key for headless installs. |
+| `BROADSIDE_API_KEY` | A fixed API key for headless installs. In a team it works as an editor that belongs to no one. Set in the stdio server's environment to a member's key, it makes that server act as that member. |
 | `BROADSIDE_MCP_DRAFTS_ONLY` | Set to `1` and agents can prepare posts but only a person can publish them, from the app. |
 | `BROADSIDE_ALLOW_PRIVATE_FETCH` | Set to `1` to let Broadside call addresses on your own network, such as an n8n webhook on localhost or a Mastodon instance on your LAN. |
 | `BROADSIDE_TICK_MS` | How often the scheduler looks for due posts. Default 5000. |
@@ -261,6 +358,8 @@ Without a password it is a local tool. It listens on `127.0.0.1`, and it only an
 
 With a password, the web app needs a signed session cookie that expires after 30 days. Wrong passwords are slowed down rather than locked out, so guessing is expensive and you can always get in with the right one. Sign out clears the session in that browser; to end every session at once, change the password. API and MCP callers always need a key; keys are 192 bits, stored hashed and shown once.
 
+With a team, each member has their own password. It is hashed with scrypt (N = 32768, r = 8, p = 3) under a salt of its own, and the cost is stored beside the hash so it can be raised later. Passwords are 12 to 200 characters. A wrong name and a wrong password get the same answer after the same work, so sign-in does not reveal which names exist; wrong attempts are counted per name and slow that name first, and nobody is locked out. A session cookie names its member and is signed with the server's secret together with that member's password hash, so changing a password or disabling a member ends their sessions everywhere on the next request. The cookie holds no role: the role is read from the database on every request, so a change holds at once, for sessions, for keys and for agents. The cookie has the same flags as before: HttpOnly, SameSite=Lax, and Secure over https. Every route that changes the team asks for a session from Broadside's own pages, so no other site and no API key can add a member, change a role or set a password.
+
 Credentials are encrypted with AES-256-GCM and never returned by any API. The data folder is created readable by its owner only.
 
 Uploads are checked by their bytes, not their name, and only real images and videos are kept. They are served with a sandboxing policy, so a stored file is shown and never run. Every page carries a closed content security policy and cannot be framed.
@@ -269,7 +368,7 @@ Outbound requests to addresses you type (media to import, a Mastodon instance, a
 
 Feeds are text from someone else's server, and are treated that way. A feed is fetched through the same guard, with a 2 MB cap applied after decompression and a 15 second timeout. The XML reader is Broadside's own and does only what feeds need: it never processes a document type, so a feed that declares entities (the route to entity expansion and to reading local files or internal addresses) is refused whole, and one that only names a public DTD has it skipped and never fetched. Only the five XML entities and numeric references are decoded, once. Depth, element count and items read are capped. Titles and summaries are reduced to plain text and stored and shown as text; nothing from a feed is rendered as HTML, and a link is kept only if it is an http or https address. Placeholders are filled in one pass, so an item cannot smuggle a placeholder into its own text.
 
-Outgoing webhooks send your posts to an address, so they are made by a person, in the app or over REST with a key, and never by an agent. Each has its own signing secret, sealed at rest like credentials, returned once and never again; the delivery log keeps the receiver's status code and nothing else it said. A delivery goes to the address you typed and nowhere else: a redirect is never followed, so the signed body cannot be sent on to another host. A payload is the post as the API returns it and contains no credentials.
+Outgoing webhooks send your posts to an address, so they are made by a person, in the app or over REST with a key, and never by an agent. Each has its own signing secret, sealed at rest like credentials, returned once and never again; the delivery log keeps the receiver's status code and nothing else it said. A delivery goes to the address you typed and nowhere else: a redirect is never followed, so the signed body cannot be sent on to another host. A payload is the post as the API returns it and contains no credentials. In a team it carries the name of the member who wrote the post.
 
 Signing in with a network starts from the app or from an API key, never from another site. A pending sign-in is one encrypted row that works once and is gone after ten minutes, and the callback connects nothing for a state value this Broadside did not issue. Where the network supports PKCE (X, TikTok) it is used. The app's secret is sent to the network in a request body or a Basic header, never in an address. Only what posting needs is kept afterwards: for Facebook, Instagram and Threads that is one token, and the app's secret is discarded. A choice of Pages or boards waits in a second row of the same kind, and the browser is shown names, never tokens.
 
@@ -277,7 +376,12 @@ Agents see text that other people control: account names, error messages from ne
 
 Known limits:
 
-- API keys have no scopes and do not expire. Revoke one under Connect when you stop using it. A key can add feeds and outgoing webhooks over REST, so an agent that holds a key and can run commands is not kept from them by the MCP tool list alone.
+- API keys do not expire. Revoke one under Connect when you stop using it. Without a team a key has no limits: it can add feeds and outgoing webhooks over REST, so an agent that holds a key and can run commands is not kept from them by the MCP tool list alone. In a team, give an agent a key with the lowest role that does its job.
+- Roles do not bind someone with a shell on the server. Whoever can read the data folder can run `npm run members`, start the stdio server or open the database.
+- Sign-in attempts are slowed per member name and for everyone, never per client: Broadside cannot see a client address it could trust, so one person guessing hard at a name makes that member's own sign-in take a few seconds longer.
+- A viewer reads everything in the app, drafts and scheduled posts included. There are no private posts and no per-account permissions: an editor can post to every connected account.
+- An invite link works for whoever opens it first. Send it somewhere private, and revoke it if it went astray.
+- A post records who created it, and nothing records who later edited or published it.
 - A feed set to publish sends out whatever its source says, including mentions and links, with no one reading it first. Draft is the default for that reason.
 - An agent that reads a feed's draft could still copy its text into a post of its own. The rule stops it publishing the draft; it does not make feed text safe to act on.
 - The address of an outgoing webhook is stored as typed and shown in the app and over REST. If your receiver's address contains a token, anyone who can open Broadside can read it. The signing secret is what a receiver should trust.
@@ -297,7 +401,8 @@ To put Broadside on the internet, keep it on `127.0.0.1` and publish it through 
 - `src/lib/analytics.ts` reads numbers back. A connector's optional `metrics` function asks its network for one post's counts and returns only what the network answered, each under the network's own word. Every reading is stored with its time, and numbers that repeat the reading before move that time on instead of adding a row; a failed one leaves the last good row in place and records the reason. A target is claimed with a compare-and-set before it is read, so two clocks never ask twice, and a 429 pauses that account until the network's wait is over. The scheduler runs this beside publishing and waits for neither.
 - `src/lib/outgoing.ts` holds outgoing webhooks. The engine queues one row per webhook when something happens and does nothing else, so it never waits for a receiver; the scheduler sends what is queued, signs each try afresh, retries with a growing wait and pauses a webhook that keeps failing. A delivery is claimed with a compare-and-set before it is sent.
 - `src/lib/feeds.ts` reads feeds and `src/lib/feed-parse.ts` is the XML reader, written from the RSS and Atom specifications with no parser dependency. An item is remembered before its post is made, so a crash between the two skips the item and can never post it twice.
-- `src/lib/mcp.ts` defines the tools once; `/mcp` (HTTP) and `bin/broadside-mcp.ts` (stdio) both serve them.
+- `src/lib/mcp.ts` defines the tools once; `/mcp` (HTTP) and `bin/broadside-mcp.ts` (stdio) both serve them. Every tool is registered through one check against `TOOL_ROLES`, and a tool with no role in that table cannot be registered.
+- `src/lib/members.ts` holds the team: members, password hashing, invites and the rules for who may change whom. `src/lib/actor.ts` answers one question for every request, who is asking and with what role, from the database each time. `src/lib/http.ts` wraps every route: `route({ role }, handler)` checks the caller against the role the route declares and hands the handler that actor, and `open("why", handler)` marks the few routes meant for anyone. `scripts/check-routes.mjs` fails for a route file that uses neither.
 - `src/lib/scheduler.ts` is an in-process clock started with the server.
 
 Adding a network is one object that implements `Connector` in `src/lib/platforms/types.ts`, plus a line in the registry and a request-shape test. Give it a `reply` function if the network can answer its own post, and it takes threads. Give it `metrics` and `reports` if the network's API gives an account its own post's counts, or `noMetrics` with the reason if it does not.

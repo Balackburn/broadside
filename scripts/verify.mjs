@@ -6,7 +6,7 @@
  * Exits non-zero on the first thing that is not true.
  */
 import { spawn, spawnSync } from "node:child_process";
-import { createHmac } from "node:crypto";
+import { createHmac, randomBytes } from "node:crypto";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
@@ -357,15 +357,19 @@ const result = (toolReply) => JSON.parse(toolReply.content[0].text);
 
 const dataDir = mkdtempSync(path.join(tmpdir(), "broadside-verify-"));
 let app;
+let openApp;
 let fake;
 let failed = false;
 
 try {
   if (!quick) {
+    // Route types come from the build. Generating them first means the type check never reads a stale list of routes.
+    step("Route types are generated", "npx", ["next", "typegen"]);
     step("Types check", "npx", ["tsc", "--noEmit"]);
     step("Lint is clean", "npx", ["eslint", "--max-warnings", "0"]);
     step("Unit tests pass", "npx", ["vitest", "run"]);
     step("Design tokens hold", "node", ["scripts/check-design.mjs"]);
+    step("Every route declares who may call it", "node", ["scripts/check-routes.mjs"]);
     step("Production build succeeds", "npx", ["next", "build"]);
   }
 
@@ -1518,11 +1522,347 @@ try {
   }
   const after = await fetch(`${locked}/api/login`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ password: "correct horse" }) });
   ok(wrongGuesses === 12 && after.status === 200 && Date.now() - began > 900, "Wrong passwords are slowed however the caller labels itself, and the right password still gets in");
+
+  /* Teams ------------------------------------------------------------------ */
+
+  // Everything above ran as one operator. From here the same install grows a team, on the server that has a shared password.
+  // It runs in a block of its own, so its names cannot be confused with the ones above.
+  console.log("\n▸ Teams");
+  {
+    // Long, distinctive and different every run: a short one could collide with a random id, and none of them is ever printed.
+    const teamPassword = () => `verify-team-${randomBytes(12).toString("hex")}`;
+    const secrets = [];
+    const fresh = () => {
+      const made = teamPassword();
+      secrets.push(made);
+      return made;
+    };
+    const on = async (origin, pathname, { method = "GET", cookie: session, key, body, site = "same-origin" } = {}) => {
+      const headers = { "content-type": "application/json" };
+      if (site) headers["sec-fetch-site"] = site;
+      if (session) headers.cookie = session;
+      if (key) headers.authorization = `Bearer ${key}`;
+      const response = await fetch(`${origin}${pathname}`, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), redirect: "manual" });
+      const text = await response.text();
+      let json = null;
+      try {
+        json = JSON.parse(text);
+      } catch {
+        /* a page, not JSON */
+      }
+      return { status: response.status, body: json, text, cookie: (response.headers.get("set-cookie") ?? "").split(";")[0], setCookie: response.headers.get("set-cookie") ?? "", location: response.headers.get("location") };
+    };
+    const team = (pathname, options) => on(locked, pathname, options);
+    const refused = (r, status = 403) => r.status === status && Boolean(r.body?.error);
+    const signInAs = (name, password, origin = locked) => on(origin, "/api/login", { method: "POST", body: { name, password }, site: null });
+    const draft = (content) => ({ content, targets: [{ account_id: ids.sandbox }], draft: true });
+
+    // Before there is a team: the screen offers one, and nothing else has changed
+    const teamPageSolo = await team("/app/team", { cookie });
+    ok(teamPageSolo.status === 200 && teamPageSolo.text.includes("Set up a team") && teamPageSolo.text.includes("the shared password no longer signs anyone in") && !teamPageSolo.text.includes("Invite someone"), "With no team, the Team screen explains what one is and offers to set one up");
+    const soloState = await team("/api/v1/team", { cookie });
+    ok(soloState.status === 200 && soloState.body.data.team === false && soloState.body.data.members.length === 0, "The install says it has no team, and every request so far ran as its one operator");
+    const ownerPassword = fresh();
+    const noSession = await team("/api/v1/team", { method: "POST", body: { name: "Olive", password: ownerPassword } });
+    const fromElsewhere = await team("/api/v1/team", { method: "POST", cookie, site: "cross-site", body: { name: "Olive", password: ownerPassword } });
+    const byKey = await team("/api/v1/team", { method: "POST", key: token, site: null, body: { name: "Olive", password: ownerPassword } });
+    const weak = await team("/api/v1/team", { method: "POST", cookie, body: { name: "Olive", password: "short" } });
+    ok(noSession.status === 401 && fromElsewhere.status === 401 && refused(byKey) && refused(weak, 400) && /at least 12 characters/.test(weak.body.error.message) && (await team("/api/v1/team", { cookie })).body.data.team === false, "A team cannot be started without the operator's session, from another site, with an API key, or with a weak password");
+
+    // The first member: two requests at the same moment make one team
+    const [first, second] = await Promise.all([
+      team("/api/v1/team", { method: "POST", cookie, body: { name: "Olive", password: ownerPassword } }),
+      team("/api/v1/team", { method: "POST", cookie, body: { name: "Mallory", password: fresh() } }),
+    ]);
+    const started = [first, second].filter((r) => r.status === 200);
+    const turnedAway = [first, second].filter((r) => r.status === 400);
+    // Either request may win. The rest of this run goes by whichever name did.
+    ok(started.length === 1 && turnedAway.length === 1 && /already has a team/.test(turnedAway[0].body.error.message), "Two people setting up a team at the same moment get one team, and one of them is told it exists");
+    const ownerName = started[0].body.data.me.name;
+    const ownerCookie = started[0].cookie;
+    ok(/^broadside_session=m1\.mem_[\w-]+\.\d+\.[0-9a-f]{64}$/.test(ownerCookie) && /HttpOnly/.test(started[0].setCookie) && /SameSite=Lax/.test(started[0].setCookie) && started[0].body.data.me.role === "owner" && !/viewer|editor|admin|owner/.test(ownerCookie), "Whoever sets up the team becomes its owner and is signed in as a member: an HttpOnly cookie that names them and carries no role");
+
+    // From this moment the shared password signs no one in
+    const sharedAgain = await on(locked, "/api/login", { method: "POST", body: { password: "correct horse" }, site: null });
+    const sharedWithName = await signInAs(ownerName, "correct horse");
+    const oldCookieApp = await team("/app", { cookie });
+    const oldCookieApi = await team("/api/v1/accounts", { cookie });
+    ok(sharedAgain.status === 401 && !sharedAgain.setCookie && sharedWithName.status === 401 && oldCookieApp.status === 307 && oldCookieApp.location.includes("/login") && oldCookieApi.status === 401, "With a team, the shared password signs no one in, and a session it started before is refused by the app and the API");
+    const loginPage = await team("/login");
+    ok(loginPage.text.includes('id="name"') && loginPage.text.includes('id="password"') && loginPage.text.includes("Sign in with your own name and password"), "The sign-in page now asks for a name and a password");
+    const ownerHome = await team("/app/team", { cookie: ownerCookie });
+    ok(ownerHome.status === 200 && ownerHome.text.includes(`You are signed in as ${ownerName}, with the owner role`) && ownerHome.text.includes("Invite someone") && ownerHome.text.includes("Your password") && ownerHome.text.includes('href="/app/team"'), "The owner's Team screen lists the members and offers invites and a password change, and the rail links to it");
+
+    const accountsConnected = (await team("/api/v1/accounts", { cookie: ownerCookie })).body.data.length;
+
+    // A key from before the team: an editor that belongs to no one
+    const oldKeyRead = await team("/api/v1/accounts", { key: token, site: null });
+    const oldKeyConnect = await team("/api/v1/accounts", { method: "POST", key: token, site: null, body: { platform: "sandbox", credentials: { name: "Sneaked in" } } });
+    const oldKeyKeys = await team("/api/v1/keys", { key: token, site: null });
+    const oldKeyPost = await team("/api/v1/posts", { method: "POST", key: token, site: null, body: draft("written with a key from before the team") });
+    ok(oldKeyRead.status === 200 && refused(oldKeyConnect) && /This needs the admin role. This key has editor/.test(oldKeyConnect.body.error.message) && refused(oldKeyKeys) && oldKeyPost.status === 200 && oldKeyPost.body.data.author === null, "A key made before the team still posts, as an editor that belongs to no one, and can no longer connect accounts or read keys");
+    const connectPage = await team("/app/connect", { cookie: ownerCookie });
+    ok(connectPage.text.includes("Created before the team. Works as an editor and belongs to no one.") && connectPage.text.includes("Revoke"), "The Connect screen marks that key as created before the team, with Revoke beside it");
+
+    // Invites: a one-time link, and the person who opens it sets their own password
+    const invite = async (by, name, role) => team("/api/v1/team/invites", { method: "POST", cookie: by, body: { name, role } });
+    const people = {};
+    for (const [name, role] of [["Ada", "admin"], ["Eddie", "editor"], ["Vic", "viewer"]]) {
+      const made = await invite(ownerCookie, name, role);
+      ok(made.status === 200 && /^\/join\/[\w-]{43}$/.test(made.body.data.path) && made.body.data.url === `${locked}${made.body.data.path}` && made.body.data.invite.role === role && !JSON.stringify(made.body.data.invite).includes(made.body.data.path.slice(6)), `The owner invites ${name} as ${role} and is handed a one-time link built from this Broadside's own address`);
+      people[name] = { role, path: made.body.data.path, password: fresh() };
+    }
+    const direct = new DatabaseSync(path.join(dataDir, "broadside.db"));
+    direct.exec("PRAGMA busy_timeout = 5000");
+    const stored = JSON.stringify(direct.prepare("SELECT * FROM invites").all()) + JSON.stringify(direct.prepare("SELECT * FROM members").all());
+    ok(Object.values(people).every((p) => !stored.includes(p.path.slice(6))) && secrets.every((secret) => !stored.includes(secret)) && /scrypt\$\d+\$8\$\d+\$/.test(stored), "The database holds no invite token and no password: a hash of each token, and scrypt hashes that carry their own salt and cost");
+    const waitingList = (await team("/api/v1/team", { cookie: ownerCookie })).body.data.invites;
+    ok(waitingList.length === 3 && waitingList.every((i) => i.invited_by === ownerName) && !JSON.stringify(waitingList).includes("token"), "The invites that are waiting are listed with who made them, and the links are never shown again");
+    const joinPage = await team(people.Ada.path, { site: null });
+    ok(joinPage.status === 200 && joinPage.text.includes("You are joining as Ada, with the admin role") && joinPage.text.includes("Set password and sign in") && joinPage.text.includes('name="robots"') && /noindex/.test(joinPage.text), "A join link opens a page that names who it is for and asks only for a password, and is kept out of search engines");
+    const joinElsewhere = await team("/api/join", { method: "POST", site: "cross-site", body: { token: people.Ada.path.slice(6), password: people.Ada.password } });
+    const joinWeak = await team("/api/join", { method: "POST", site: null, body: { token: people.Ada.path.slice(6), password: "short" } });
+    ok(joinElsewhere.status === 403 && refused(joinWeak, 400), "A join posted from another site, or with a weak password, is refused and leaves the link unused");
+    for (const [name, person] of Object.entries(people)) {
+      const joined = await team("/api/join", { method: "POST", site: null, body: { token: person.path.slice(6), password: person.password } });
+      ok(joined.status === 200 && joined.body.data.name === name && joined.body.data.role === person.role && /^broadside_session=m1\./.test(joined.cookie) && /HttpOnly/.test(joined.setCookie), `${name} opens the link, sets a password of their own, and is signed in as ${person.role}`);
+      person.cookie = joined.cookie;
+    }
+    const usedAgain = await team("/api/join", { method: "POST", site: null, body: { token: people.Vic.path.slice(6), password: fresh() } });
+    const usedPage = await team(people.Vic.path, { site: null });
+    const guessed = await team("/api/join", { method: "POST", site: null, body: { token: randomBytes(32).toString("base64url"), password: fresh() } });
+    ok(refused(usedAgain, 400) && /has been used, has run out, or was never valid/.test(usedAgain.body.error.message) && usedPage.text.includes("This link does not work.") && refused(guessed, 400) && guessed.body.error.message === usedAgain.body.error.message, "A link works once: used again, or guessed, it gets the same refusal and makes no member");
+    const members = (await team("/api/v1/team", { cookie: ownerCookie })).body.data.members;
+    const idOf = (name) => members.find((m) => m.name === name).id;
+    ok(members.length === 4 && members.map((m) => m.role).sort().join() === "admin,editor,owner,viewer" && !JSON.stringify(members).includes("scrypt"), "The team has its four members, one of each role, and the list holds no password hash");
+
+    // Signing in by name
+    const wrongPass = await signInAs("Eddie", fresh());
+    const wrongName = await signInAs("Nobody By This Name", people.Eddie.password);
+    const rightAnyCase = await signInAs("  eDDIE ", people.Eddie.password);
+    ok(wrongPass.status === 401 && wrongName.status === 401 && wrongPass.text === wrongName.text && !wrongPass.setCookie && !wrongName.setCookie, "A wrong name and a wrong password get the same status and the same words");
+    ok(rightAnyCase.status === 200 && /^broadside_session=m1\./.test(rightAnyCase.cookie), "A member signs in with their name in any capitals or spacing, and their own password");
+    const dupe = await invite(ownerCookie, " ADA ", "viewer");
+    ok(refused(dupe, 400) && /already a member called ADA/.test(dupe.body.error.message), "A name that differs only by capitals or spaces from a member's is refused");
+
+    // What each role may do over HTTP
+    const tryAll = async (who) => ({
+      read: await team("/api/v1/posts", { cookie: who }),
+      write: await team("/api/v1/posts", { method: "POST", cookie: who, body: draft("role check") }),
+      tag: await team("/api/v1/tags", { method: "POST", cookie: who, body: { name: "role-check" } }),
+      connect: await team("/api/v1/accounts", { method: "POST", cookie: who, body: { platform: "sandbox", credentials: { name: "Role check" } } }),
+      keys: await team("/api/v1/keys", { cookie: who }),
+      hook: await team("/api/v1/outgoing-webhooks", { method: "POST", cookie: who, body: { name: "role check", url: `${net}/receiver` } }),
+      invite: await team("/api/v1/team/invites", { method: "POST", cookie: who, body: { name: `Guest ${randomBytes(3).toString("hex")}`, role: "viewer" } }),
+    });
+    const asViewer = await tryAll(people.Vic.cookie);
+    ok(asViewer.read.status === 200 && Object.entries(asViewer).filter(([what]) => what !== "read").every(([, r]) => refused(r)) && /This needs the editor role. You have viewer/.test(asViewer.write.body.error.message), "A viewer reads posts and is refused every change: writing, tagging, connecting, keys, webhooks and invites");
+    const asEditor = await tryAll(people.Eddie.cookie);
+    ok(asEditor.read.status === 200 && asEditor.write.status === 200 && asEditor.write.body.data.author.name === "Eddie" && asEditor.tag.status === 200 && refused(asEditor.connect) && refused(asEditor.keys) && refused(asEditor.hook) && refused(asEditor.invite), "An editor writes and tags, with the post recorded as theirs, and is refused accounts, keys, webhooks and invites");
+    const asAdmin = await tryAll(people.Ada.cookie);
+    ok(Object.values(asAdmin).every((r) => r.status === 200) && asAdmin.connect.body.data.handle === "Role check", "An admin does all of it: connects an account, reads keys, adds a webhook and invites someone");
+    await team(`/api/v1/outgoing-webhooks/${asAdmin.hook.body.data.id}`, { method: "DELETE", cookie: people.Ada.cookie });
+    await team(`/api/v1/accounts/${asAdmin.connect.body.data.id}`, { method: "DELETE", cookie: people.Ada.cookie });
+    const hooksForViewer = (await team("/api/v1/outgoing-webhooks", { cookie: people.Vic.cookie })).body.data;
+    const hooksForAdmin = (await team("/api/v1/outgoing-webhooks", { cookie: people.Ada.cookie })).body.data;
+    ok(hooksForViewer[0].url === net && hooksForViewer[0].redacted === true && hooksForAdmin[0].url === `${net}/receiver` && !("redacted" in hooksForAdmin[0]), "Below admin a webhook's address is shown as its site alone; an admin sees it whole");
+
+    // Escalation
+    const adminOnOwner = await team(`/api/v1/team/members/${idOf(ownerName)}`, { method: "PATCH", cookie: people.Ada.cookie, body: { role: "viewer" } });
+    const adminDisablesOwner = await team(`/api/v1/team/members/${idOf(ownerName)}`, { method: "PATCH", cookie: people.Ada.cookie, body: { disabled: true } });
+    const adminOnSelf = await team(`/api/v1/team/members/${idOf("Ada")}`, { method: "PATCH", cookie: people.Ada.cookie, body: { role: "owner" } });
+    const adminMakesOwner = await team(`/api/v1/team/members/${idOf("Vic")}`, { method: "PATCH", cookie: people.Ada.cookie, body: { role: "owner" } });
+    const adminInvitesOwner = await invite(people.Ada.cookie, "A New Owner", "owner");
+    const afterTries = (await team("/api/v1/team", { cookie: ownerCookie })).body.data.members;
+    ok(
+      [adminOnOwner, adminDisablesOwner, adminOnSelf, adminMakesOwner, adminInvitesOwner].every((r) => refused(r, 400)) && /needs an owner/.test(adminOnOwner.body.error.message) && /cannot change your own role/.test(adminOnSelf.body.error.message) && afterTries.map((m) => `${m.name}:${m.role}:${m.disabled_at}`).sort().join() === members.map((m) => `${m.name}:${m.role}:${m.disabled_at}`).sort().join(),
+      "An admin cannot change or disable the owner, raise their own role, or make or invite an owner, and nobody's role moved",
+    );
+    const lastOwnerSelf = await team(`/api/v1/team/members/${idOf(ownerName)}`, { method: "PATCH", cookie: ownerCookie, body: { disabled: true } });
+    const lastOwnerDemote = await team(`/api/v1/team/members/${idOf(ownerName)}`, { method: "PATCH", cookie: ownerCookie, body: { role: "admin" } });
+    ok(refused(lastOwnerSelf, 400) && refused(lastOwnerDemote, 400), "The last owner cannot be disabled or demoted, by themselves either");
+    const editorKey = await team("/api/v1/keys", { method: "POST", cookie: people.Eddie.cookie, body: { name: "an admin key for an editor", role: "admin" } });
+    const tooHighKey = await team("/api/v1/keys", { method: "POST", cookie: people.Ada.cookie, body: { name: "an owner key for an admin", role: "owner" } });
+    ok(refused(editorKey) && refused(tooHighKey, 400) && /up to your own, which is admin/.test(tooHighKey.body.error.message), "An editor cannot make a key at all, and an admin cannot make one above admin");
+    const teamByKey = await team("/api/v1/team/invites", { method: "POST", key: token, site: null, body: { name: "By key", role: "viewer" } });
+    ok(refused(teamByKey) && teamByKey.body.error.code === "needs_person" && /An API key cannot do it/.test(teamByKey.body.error.message), "No API key reaches the team's own routes: they are for a person signed in to the app");
+
+    // Keys in a team, over HTTP and over MCP
+    const viewerKeyMade = await team("/api/v1/keys", { method: "POST", cookie: people.Ada.cookie, body: { name: "read only agent", role: "viewer" } });
+    const editorKeyMade = await team("/api/v1/keys", { method: "POST", cookie: people.Ada.cookie, body: { name: "writing agent", role: "editor" } });
+    const viewerKey = viewerKeyMade.body.data.token;
+    const writerKey = editorKeyMade.body.data.token;
+    ok(viewerKeyMade.body.data.key.role === "viewer" && viewerKeyMade.body.data.key.member_id === idOf("Ada") && editorKeyMade.body.data.key.role === "editor", "An admin makes keys that are theirs, each with a role chosen at that moment");
+    const keyReads = await team("/api/v1/posts", { key: viewerKey, site: null });
+    const keyWrites = await team("/api/v1/posts", { method: "POST", key: viewerKey, site: null, body: draft("from a viewer key") });
+    const writerWrites = await team("/api/v1/posts", { method: "POST", key: writerKey, site: null, body: draft("from an editor key") });
+    const writerConnects = await team("/api/v1/accounts", { method: "POST", key: writerKey, site: null, body: { platform: "sandbox", credentials: { name: "No" } } });
+    ok(keyReads.status === 200 && refused(keyWrites) && /This key has viewer/.test(keyWrites.body.error.message) && writerWrites.status === 200 && writerWrites.body.data.author.name === "Ada" && refused(writerConnects), "Over HTTP a viewer key reads and cannot write; an editor key writes, as its owner, and cannot connect accounts");
+    const mcpAs = async (key) => {
+      const made = new Client({ name: "verify-team", version: "1.0.0" });
+      await made.connect(new StreamableHTTPClientTransport(new URL(`${locked}/mcp`), { requestInit: { headers: { authorization: `Bearer ${key}` } } }));
+      return made;
+    };
+    const reader = await mcpAs(viewerKey);
+    const readerList = await reader.callTool({ name: "list_posts", arguments: { limit: 3 } });
+    const readerAccounts = await reader.callTool({ name: "list_accounts", arguments: {} });
+    const postsBeforeAgent = (await team("/api/v1/posts?limit=500", { cookie: ownerCookie })).body.data.length;
+    const readerCreate = await reader.callTool({ name: "create_post", arguments: { content: "a viewer key tries to publish", targets: [{ account_id: ids.sandbox }] } });
+    const readerPublish = await reader.callTool({ name: "publish_post", arguments: { post_id: writerWrites.body.data.id } });
+    const readerUpload = await reader.callTool({ name: "upload_media", arguments: { url: `${net}/pixel.png` } });
+    ok(
+      !readerList.isError && result(readerAccounts).length === accountsConnected && [readerCreate, readerPublish, readerUpload].every((r) => r.isError === true && /needs the editor role, and this key has viewer/.test(r.content[0].text)) && (await team("/api/v1/posts?limit=500", { cookie: ownerCookie })).body.data.length === postsBeforeAgent && (await team(`/api/v1/posts/${writerWrites.body.data.id}`, { cookie: ownerCookie })).body.data.status === "draft",
+      "Over MCP a viewer key lists and reads, and create_post, publish_post and upload_media are refused with the role they need; nothing was made or sent",
+    );
+    const writer = await mcpAs(writerKey);
+    const writerPost = result(await writer.callTool({ name: "create_post", arguments: { content: "an editor key publishes", targets: [{ account_id: ids.sandbox }] } }));
+    const writerDisconnect = await writer.callTool({ name: "disconnect_account", arguments: { account_id: ids.sandbox } });
+    const writerSandbox = await writer.callTool({ name: "connect_account", arguments: { platform: "sandbox", name: "Sneaked" } });
+    ok(writerPost.status === "published" && writerPost.author.name === "Ada" && [writerDisconnect, writerSandbox].every((r) => r.isError === true && /needs the admin role, and this key has editor/.test(r.content[0].text)) && (await team("/api/v1/accounts", { cookie: ownerCookie })).body.data.length === accountsConnected, "Over MCP an editor key publishes, recorded as its owner, and is refused connect_account and disconnect_account");
+    const legacy = await mcpAs(token);
+    const legacyPost = result(await legacy.callTool({ name: "create_post", arguments: draft("the old key, over MCP") }));
+    const legacyDisconnect = await legacy.callTool({ name: "disconnect_account", arguments: { account_id: ids.sandbox } });
+    ok(legacyPost.status === "draft" && legacyPost.author === null && legacyDisconnect.isError === true && /this key has editor/.test(legacyDisconnect.content[0].text), "The key from before the team is an editor over MCP too");
+    await legacy.close();
+
+    // The local stdio server is held to the same roles
+    const stdio = async (extra) => {
+      const made = new Client({ name: "verify-team-stdio", version: "1.0.0" });
+      await made.connect(new StdioClientTransport({ command: "npx", args: ["tsx", "bin/broadside-mcp.ts"], cwd: root, env: { ...env, BROADSIDE_PUBLIC_URL: locked, ...extra } }));
+      return made;
+    };
+    const stdioPlain = await stdio({});
+    const stdioDraft = result(await stdioPlain.callTool({ name: "create_post", arguments: draft("from stdio, in a team") }));
+    const stdioDisconnect = await stdioPlain.callTool({ name: "disconnect_account", arguments: { account_id: ids.sandbox } });
+    await stdioPlain.close();
+    const stdioViewer = await stdio({ BROADSIDE_API_KEY: viewerKey });
+    const stdioRead = await stdioViewer.callTool({ name: "list_posts", arguments: { limit: 1 } });
+    const stdioWrite = await stdioViewer.callTool({ name: "create_post", arguments: draft("stdio with a viewer key") });
+    await stdioViewer.close();
+    ok(stdioDraft.status === "draft" && stdioDraft.author === null && stdioDisconnect.isError === true && /this key has editor/.test(stdioDisconnect.content[0].text), "In a team the stdio server works as an editor that belongs to no one: it drafts, and cannot disconnect an account");
+    ok(!stdioRead.isError && stdioWrite.isError === true && /this key has viewer/.test(stdioWrite.content[0].text), "Given a viewer's key in BROADSIDE_API_KEY, the stdio server reads and cannot write");
+
+    // The screens leave out what a member cannot do
+    const viewerCompose = await team("/app", { cookie: people.Vic.cookie });
+    const viewerConnect = await team("/app/connect", { cookie: people.Vic.cookie });
+    const viewerPosts = await team(`/app/posts?post=${asEditor.write.body.data.id}`, { cookie: people.Vic.cookie });
+    const editorPosts = await team(`/app/posts?post=${asEditor.write.body.data.id}`, { cookie: people.Eddie.cookie });
+    ok(viewerCompose.text.includes("You have the viewer role, which reads posts and does not write them") && viewerConnect.text.includes("they are made by an admin") && !viewerConnect.text.includes("read only agent") && !viewerConnect.text.includes('href="/app/connect"'), "A viewer's Compose and Connect screens say what the role cannot do, show no keys, and the rail leaves Connect out");
+    ok(viewerPosts.text.includes("By Eddie") && viewerPosts.text.includes("Written by Eddie.") && !viewerPosts.text.includes("Publish now") && !viewerPosts.text.includes("Remove from history") && editorPosts.text.includes("Publish now") && editorPosts.text.includes("Remove from history"), "Posts show who wrote each one; a viewer gets no buttons on a post, and an editor gets them");
+    const viewerAccounts = await team("/app/accounts", { cookie: people.Vic.cookie });
+    const viewerAutomations = await team("/app/automations", { cookie: people.Vic.cookie });
+    const viewerTeam = await team("/app/team", { cookie: people.Vic.cookie });
+    ok(
+      !viewerAccounts.text.includes("Add an account") && !viewerAccounts.text.includes(">Disconnect<") && viewerAccounts.text.includes("done by an admin") && !viewerAutomations.text.includes("Check now") && !viewerAutomations.text.includes("Send a test") && !viewerAutomations.text.includes(`${net}/receiver`) && viewerAutomations.text.includes("Admins see the full address.") && viewerTeam.text.includes("Your password") && !viewerTeam.text.includes("Invite someone") && !viewerTeam.text.includes("Invites waiting"),
+      "A viewer's Accounts, Automations and Team screens list everything and offer none of the controls, and a webhook's address is cut to its site",
+    );
+    const adminConnect = await team("/app/connect", { cookie: people.Ada.cookie });
+    ok(adminConnect.text.includes("read only agent") && adminConnect.text.includes("Ada, viewer") && adminConnect.text.includes("Role for the key") && !adminConnect.text.includes(viewerKey), "An admin's Connect screen shows each key with its owner and role, and never a token");
+
+    // A role change holds from the next request
+    const demote = await team(`/api/v1/team/members/${idOf("Eddie")}`, { method: "PATCH", cookie: ownerCookie, body: { role: "viewer" } });
+    const afterDemotion = await team("/api/v1/posts", { method: "POST", cookie: people.Eddie.cookie, body: draft("after being demoted") });
+    const adminDemoted = await team(`/api/v1/team/members/${idOf("Ada")}`, { method: "PATCH", cookie: ownerCookie, body: { role: "viewer" } });
+    const keyAfterDemotion = await team("/api/v1/posts", { method: "POST", key: writerKey, site: null, body: draft("with the key of a demoted admin") });
+    const mcpAfterDemotion = await writer.callTool({ name: "create_post", arguments: draft("over MCP with the key of a demoted admin") });
+    ok(demote.body.data.role === "viewer" && refused(afterDemotion) && adminDemoted.status === 200 && refused(keyAfterDemotion) && /This key has viewer/.test(keyAfterDemotion.body.error.message) && mcpAfterDemotion.isError === true && /this key has viewer/.test(mcpAfterDemotion.content[0].text), "A demotion holds from the next request: the same cookie can no longer write, and the member's editor key drops to what its owner may now do, over HTTP and MCP");
+    await team(`/api/v1/team/members/${idOf("Eddie")}`, { method: "PATCH", cookie: ownerCookie, body: { role: "editor" } });
+    await team(`/api/v1/team/members/${idOf("Ada")}`, { method: "PATCH", cookie: ownerCookie, body: { role: "admin" } });
+    const restored = await team("/api/v1/posts", { method: "POST", key: writerKey, site: null, body: draft("with the key of a restored admin") });
+    ok(restored.status === 200 && (await team("/api/v1/posts", { method: "POST", cookie: people.Eddie.cookie, body: draft("restored") })).status === 200, "Promoted back, the same cookie and the same key work again, the key no higher than the role it was made with");
+
+    // Disabling ends sessions and keys at once
+    const disable = await team(`/api/v1/team/members/${idOf("Ada")}`, { method: "PATCH", cookie: ownerCookie, body: { disabled: true } });
+    const deadCookieApi = await team("/api/v1/posts", { cookie: people.Ada.cookie });
+    const deadCookieApp = await team("/app", { cookie: people.Ada.cookie });
+    const deadKey = await team("/api/v1/posts", { key: writerKey, site: null });
+    const deadMcp = await fetch(`${locked}/mcp`, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", authorization: `Bearer ${viewerKey}` }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) });
+    const deadLogin = await signInAs("Ada", people.Ada.password);
+    ok(disable.body.data.disabled_at && deadCookieApi.status === 401 && deadCookieApp.status === 307 && deadKey.status === 401 && deadMcp.status === 401 && deadLogin.status === 401 && deadLogin.text === wrongPass.text, "A disabled member is out at once: their cookie, their keys over HTTP and MCP, and their password all stop working, and sign-in gives nothing away");
+    await team(`/api/v1/team/members/${idOf("Ada")}`, { method: "PATCH", cookie: ownerCookie, body: { disabled: false } });
+    const stillDead = await team("/api/v1/posts", { cookie: people.Ada.cookie });
+    const backIn = await signInAs("Ada", people.Ada.password);
+    ok(stillDead.status === 401 && backIn.status === 200 && (await team("/api/v1/posts", { key: writerKey, site: null })).status === 200, "Enabled again, the old session stays ended; the member signs in afresh and their keys work again");
+    people.Ada.cookie = backIn.cookie;
+    await reader.close();
+    await writer.close();
+
+    // A member changes their own password
+    const elsewhere = (await signInAs("Vic", people.Vic.password)).cookie;
+    const nextPassword = fresh();
+    const wrongCurrent = await team("/api/v1/team/password", { method: "POST", cookie: people.Vic.cookie, body: { current: fresh(), next: nextPassword } });
+    const changed = await team("/api/v1/team/password", { method: "POST", cookie: people.Vic.cookie, body: { current: people.Vic.password, next: nextPassword } });
+    ok(refused(wrongCurrent, 400) && changed.status === 200 && /^broadside_session=m1\./.test(changed.cookie) && changed.cookie !== people.Vic.cookie, "A member changes their own password by giving the current one, and this browser is handed a new session");
+    ok(
+      (await team("/api/v1/posts", { cookie: elsewhere })).status === 401 && (await team("/api/v1/posts", { cookie: people.Vic.cookie })).status === 401 && (await team("/api/v1/posts", { cookie: changed.cookie })).status === 200 && (await signInAs("Vic", people.Vic.password)).status === 401 && (await signInAs("Vic", nextPassword)).status === 200,
+      "Changing a password ends every session signed with the old one, and only the new password signs in",
+    );
+    people.Vic.cookie = changed.cookie;
+    people.Vic.password = nextPassword;
+
+    // On this machine with no password at all, a team still asks everyone to sign in
+    const openPort = lockedPort + 1;
+    const openBase = `http://127.0.0.1:${openPort}`;
+    openApp = spawn("npx", ["next", "start", "-p", String(openPort), "-H", "127.0.0.1"], { cwd: root, env: { ...env, BROADSIDE_LOGIN_DELAY_MS: "20" }, stdio: "ignore" });
+    await until(async () => (await fetch(`${openBase}/api/health`)).ok, "the server with no password", 60000);
+    const openGate = await on(openBase, "/app");
+    const openApi = await on(openBase, "/api/v1/accounts");
+    const openShared = await on(openBase, "/api/login", { method: "POST", body: { password: "correct horse" }, site: null });
+    const openMember = await signInAs("Eddie", people.Eddie.password, openBase);
+    ok(openGate.status === 307 && openGate.location.includes("/login") && openApi.status === 401 && openShared.status === 401 && openMember.status === 200 && (await on(openBase, "/api/v1/accounts", { cookie: openMember.cookie })).status === 200, "On 127.0.0.1 with no BROADSIDE_PASSWORD, a team still sends visitors to sign in, and a member's own sign-in is what gets through");
+
+    // Recovery from the server
+    const cli = (...args) => spawnSync("npx", ["tsx", "bin/members.ts", ...args], { cwd: root, env: { ...env, BROADSIDE_PUBLIC_URL: locked }, encoding: "utf8" });
+    const listing = cli("list");
+    ok(listing.status === 0 && [ownerName, "Ada", "Eddie", "Vic"].every((name) => listing.stdout.includes(name)) && /owner/.test(listing.stdout) && secrets.every((secret) => !listing.stdout.includes(secret)) && !/scrypt/.test(listing.stdout), "npm run members -- list shows each member and role, and no password or hash");
+    const reset = cli("reset", "vic");
+    const resetLink = reset.stdout.match(new RegExp(`${locked}(/join/[\\w-]{43})`))?.[1];
+    const afterReset = await team("/api/v1/posts", { cookie: people.Vic.cookie });
+    const oldAfterReset = await signInAs("Vic", people.Vic.password);
+    ok(reset.status === 0 && Boolean(resetLink) && afterReset.status === 401 && oldAfterReset.status === 401, "reset takes no password: it prints a one-time link, and the member's old password and sessions stop at once");
+    const resetPage = await team(resetLink, { site: null });
+    const recovered = fresh();
+    const resetJoin = await team("/api/join", { method: "POST", site: null, body: { token: resetLink.slice(6), password: recovered } });
+    ok(resetPage.text.includes("This link sets a new password for Vic.") && resetJoin.status === 200 && resetJoin.body.data.role === "viewer" && (await signInAs("Vic", recovered)).status === 200 && (await team("/api/v1/team", { cookie: ownerCookie })).body.data.members.length === 4, "The link sets a new password for the same member, with the same role, and adds no one");
+    const cliDisable = cli("disable", "Eddie");
+    const cliLastOwner = cli("disable", ownerName);
+    ok(cliDisable.status === 0 && (await team("/api/v1/posts", { cookie: people.Eddie.cookie })).status === 401 && (await on(openBase, "/api/v1/accounts", { cookie: openMember.cookie })).status === 401 && cliLastOwner.status === 1 && /is the only owner/.test(cliLastOwner.stderr) && (await team("/api/v1/posts", { cookie: ownerCookie })).status === 200, "disable signs a member out on every server sharing the data folder, and refuses the last owner");
+    const unconfirmed = cli("leave-team");
+    ok(unconfirmed.status === 1 && /Run it again with --yes/.test(unconfirmed.stderr) && (await team("/api/v1/team", { cookie: ownerCookie })).body.data.team === true, "leave-team does nothing without --yes, and says what it would remove");
+
+    // Nothing above leaked a password, a hash or a token into a page or a reply
+    // The reset command's output holds its one-time link, as it is meant to; it is checked here for passwords and hashes like the rest.
+    const everything = [ownerHome, connectPage, adminConnect, viewerTeam, viewerPosts, listing.stdout, reset.stdout, reset.stderr, cliDisable.stdout, unconfirmed.stderr].map((r) => (typeof r === "string" ? r : r.text)).join("\n");
+    const storedNow = JSON.stringify(direct.prepare("SELECT * FROM members").all()) + JSON.stringify(direct.prepare("SELECT * FROM invites").all()) + JSON.stringify(direct.prepare("SELECT * FROM api_keys").all());
+    ok(secrets.every((secret) => !everything.includes(secret) && !storedNow.includes(secret)) && !/scrypt\$/.test(everything) && ![viewerKey, writerKey, resetLink.slice(6)].some((value) => storedNow.includes(value)), "No password, password hash, API token or invite token appears in any page, reply or command output, and none is stored in the clear");
+    direct.close();
+
+    // Back to one operator
+    const postsWithTeam = (await team("/api/v1/posts?limit=500", { cookie: ownerCookie })).body.data.length;
+    const left = cli("leave-team", "--yes");
+    ok(left.status === 0 && /Removed 4 members/.test(left.stdout) && /single-user mode again/.test(left.stdout), "leave-team --yes removes every member and says the install is single-user again");
+    const soloAgain = await team("/api/v1/team", { cookie });
+    const memberAfter = await team("/api/v1/posts", { cookie: ownerCookie });
+    const sharedWorks = await on(locked, "/api/login", { method: "POST", body: { password: "correct horse" }, site: null });
+    ok(soloAgain.status === 200 && soloAgain.body.data.team === false && memberAfter.status === 401 && sharedWorks.status === 200 && /^broadside_session=\d+\.[0-9a-f]{64}$/.test(sharedWorks.cookie) && (await team("/app", { cookie })).status === 200, "The shared password signs in again, the session it started before the team works again, and a member's cookie opens nothing");
+    const oldKeyOwner = await team("/api/v1/keys", { key: token, site: null });
+    const memberKeyGone = await team("/api/v1/posts", { key: viewerKey, site: null });
+    const soloPosts = await team("/api/v1/posts?limit=500", { cookie });
+    ok(oldKeyOwner.status === 200 && oldKeyOwner.body.data.every((k) => k.member_id === null) && memberKeyGone.status === 401 && soloPosts.body.data.length === postsWithTeam && (await team("/api/v1/accounts", { cookie })).body.data.length === accountsConnected, "The key from before the team is the operator's again, the keys members made are gone rather than promoted, and every post and account is still there");
+    const openAgain = await on(openBase, "/app");
+    const openApiAgain = await on(openBase, "/api/v1/accounts");
+    const loginSolo = await team("/login");
+    const teamPageAgain = await team("/app/team", { cookie });
+    ok(openAgain.status === 200 && openApiAgain.status === 200 && !loginSolo.text.includes("Sign in with your own name and password") && teamPageAgain.text.includes("Set up a team") && !teamPageAgain.text.includes("By Eddie"), "Single-user mode is back as it was: open on this machine with no password, a sign-in page that asks only for the password, and the Team screen offering to start again");
+    const authoredBefore = await team(`/app/posts?post=${asEditor.write.body.data.id}`, { cookie });
+    ok(authoredBefore.status === 200 && !authoredBefore.text.includes("Written by") && !authoredBefore.text.includes("By Eddie") && authoredBefore.text.includes("Publish now"), "With no team, posts show no author, and the operator has every button again");
+  }
 } catch (error) {
   failed = true;
   console.error(`\nverify: FAIL after ${checks} passing checks — ${error.message}`);
 } finally {
   app?.kill("SIGTERM");
+  openApp?.kill("SIGTERM");
   fake?.close();
   rmSync(dataDir, { recursive: true, force: true });
 }
