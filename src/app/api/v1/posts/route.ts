@@ -8,6 +8,8 @@ export const GET = route((request) => {
     from: q.get("from") ?? undefined,
     to: q.get("to") ?? undefined,
     tag: q.get("tag") ?? undefined,
+    origin: q.get("origin") ?? undefined,
+    feed_id: q.get("feed_id") ?? undefined,
     limit: q.get("limit") ? Number(q.get("limit")) : undefined,
   });
 });

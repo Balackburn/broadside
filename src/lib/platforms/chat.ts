@@ -186,6 +186,7 @@ export const webhook: Connector = {
   setup: [
     "Point this at any URL that accepts a JSON POST: Zapier, n8n, Make, or your own server.",
     "Each post arrives as { text, media, options }. Reply with { id, url } to have them shown here.",
+    "This is a destination: it receives your posts. To be told when a post is published or fails, add an outgoing webhook under Automations.",
   ],
   fields: [
     { key: "url", label: "URL", kind: "url", placeholder: "https://example.com/hooks/broadside" },

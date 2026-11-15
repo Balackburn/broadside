@@ -105,6 +105,11 @@ const ADDED: [table: string, column: string, definition: string][] = [
   ["posts", "repeat_spawned", "INTEGER NOT NULL DEFAULT 0"],
   // Signatures: the one an account offers by default in the composer.
   ["accounts", "signature_id", "TEXT"],
+  // Feeds: the feed that made a post, and why a draft is being held back when its text does not fit a chosen network.
+  ["posts", "feed_id", "TEXT"],
+  ["posts", "held_reason", "TEXT"],
+  // Outgoing webhooks: the outcome last announced for a post, so one outcome is announced once however many clocks see it.
+  ["posts", "announced", "TEXT"],
 ];
 
 /**
@@ -175,6 +180,73 @@ CREATE TABLE IF NOT EXISTS metric_backoff (
   strikes INTEGER NOT NULL DEFAULT 1,
   reason TEXT
 );
+CREATE TABLE IF NOT EXISTS outgoing_webhooks (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  url TEXT NOT NULL,
+  secret TEXT NOT NULL,
+  events TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active',
+  paused_reason TEXT,
+  failures INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS outgoing_deliveries (
+  id TEXT PRIMARY KEY,
+  webhook_id TEXT NOT NULL REFERENCES outgoing_webhooks(id) ON DELETE CASCADE,
+  event TEXT NOT NULL,
+  post_id TEXT,
+  payload TEXT NOT NULL,
+  status TEXT NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  response_code INTEGER,
+  error TEXT,
+  created_at TEXT NOT NULL,
+  attempted_at TEXT,
+  next_attempt_at TEXT
+);
+CREATE INDEX IF NOT EXISTS outgoing_deliveries_webhook ON outgoing_deliveries(webhook_id, created_at);
+CREATE INDEX IF NOT EXISTS outgoing_deliveries_status ON outgoing_deliveries(status);
+CREATE TABLE IF NOT EXISTS feeds (
+  id TEXT PRIMARY KEY,
+  url TEXT NOT NULL,
+  feed_key TEXT NOT NULL UNIQUE,
+  title TEXT,
+  template TEXT NOT NULL,
+  action TEXT NOT NULL DEFAULT 'draft',
+  group_id TEXT,
+  status TEXT NOT NULL DEFAULT 'active',
+  since TEXT NOT NULL,
+  baselined INTEGER NOT NULL DEFAULT 0,
+  etag TEXT,
+  last_modified TEXT,
+  last_checked_at TEXT,
+  last_error TEXT,
+  failures INTEGER NOT NULL DEFAULT 0,
+  next_check_at TEXT NOT NULL,
+  claimed_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS feed_accounts (
+  feed_id TEXT NOT NULL REFERENCES feeds(id) ON DELETE CASCADE,
+  account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  PRIMARY KEY (feed_id, account_id)
+);
+CREATE TABLE IF NOT EXISTS feed_items (
+  feed_key TEXT NOT NULL,
+  item_key TEXT NOT NULL,
+  feed_id TEXT NOT NULL,
+  title TEXT,
+  link TEXT,
+  outcome TEXT NOT NULL,
+  post_id TEXT,
+  note TEXT,
+  seen_at TEXT NOT NULL,
+  PRIMARY KEY (feed_key, item_key)
+);
+CREATE INDEX IF NOT EXISTS feed_items_post ON feed_items(post_id);
 `;
 
 export function migrate(handle: DatabaseSync): void {
@@ -191,6 +263,7 @@ export function migrate(handle: DatabaseSync): void {
       }
     }
     handle.exec("CREATE INDEX IF NOT EXISTS posts_series ON posts(series_id)");
+    handle.exec("CREATE INDEX IF NOT EXISTS posts_feed ON posts(feed_id)");
     handle.exec(ADDED_TABLES);
     handle.exec("COMMIT");
   } catch (error) {

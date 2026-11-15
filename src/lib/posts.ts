@@ -4,6 +4,7 @@ import { all, db, get, now, run } from "./db";
 import { groupTargets } from "./groups";
 import { getMedia, toItem, type Media } from "./media";
 import { guardedFetch } from "./net";
+import { listening, queueEvent, type EventName } from "./outgoing";
 import { connector, fits, measure, problems, threadProblems } from "./platforms";
 import { PublishError, type PartRef } from "./platforms/types";
 import { EVERY, isTimeZone, nextOccurrence, type Every } from "./repeat";
@@ -46,7 +47,12 @@ export type Post = {
   tags: string[];
   status: PostStatus;
   publish_at: string | null;
+  /** Where the post came from: "ui", "api", "mcp", or "feed" for one made from a feed item. */
   origin: string;
+  /** The feed that made this post. `title` is null once that feed has been deleted. */
+  feed: { id: string; title: string | null } | null;
+  /** Why a draft made from a feed item is being held: it does not fit a network it was meant for. Null on every other post. */
+  held_reason: string | null;
   created_at: string;
   updated_at: string;
   /** Set while this occurrence is due to be followed by another. */
@@ -92,10 +98,52 @@ type PostRow = {
   repeat_anchor: string | null;
   repeat_count: number;
   repeat_spawned: number;
+  feed_id: string | null;
+  held_reason: string | null;
 };
 type TargetRow = Omit<Target, "options" | "url" | "parts"> & { options: string; external_url: string | null; post_id: string; parts: string; parts_done: number };
 
 const MAX_ATTEMPTS = 3;
+
+/** What only Broadside itself says about a post it makes. It is a separate argument so nothing in a request body can set it. */
+type Internal = {
+  /** The feed this post was made from. Its origin is then "feed". */
+  feed_id?: string;
+  /** Save the post as a held draft, with the reason, when it does not fit a network, instead of refusing it. */
+  hold?: boolean;
+};
+
+/**
+ * Tells the outgoing webhooks that something happened to a post. It only
+ * queues rows; the scheduler sends them. Whatever goes wrong here is logged
+ * and goes no further, so a webhook can never hold up or fail a publish.
+ */
+function announce(event: EventName, postId: string, targetId?: string): void {
+  try {
+    if (!listening(event)) return;
+    const post = getPost(postId);
+    if (post) queueEvent(event, post, targetId ? post.targets.find((t) => t.id === targetId) : undefined);
+  } catch (error) {
+    console.error("[broadside] could not queue an outgoing webhook event:", (error as Error).message);
+  }
+}
+
+/**
+ * Announces how a post ended up once every target has settled: published,
+ * partly published or failed. The mark on the post is a compare-and-set, so
+ * the outcome is announced once however many targets or processes finish
+ * together, and again only when a retry changes it.
+ */
+function announceOutcome(postId: string): void {
+  try {
+    const post = getPost(postId);
+    if (!post || (post.status !== "published" && post.status !== "partial" && post.status !== "failed")) return;
+    const mark = `${post.status}:${post.targets.reduce((sum, t) => sum + t.attempts, 0)}`;
+    if (run("UPDATE posts SET announced = ? WHERE id = ? AND COALESCE(announced, '') <> ?", mark, postId, mark)) announce(`post.${post.status}`, postId);
+  } catch (error) {
+    console.error("[broadside] could not announce a post's outcome:", (error as Error).message);
+  }
+}
 
 /** One status for the whole post, derived from its targets so the two can never disagree. */
 export function aggregate(statuses: TargetStatus[]): PostStatus {
@@ -119,6 +167,13 @@ function partStatus(status: TargetStatus, index: number, done: number): PartStat
 
 /** Whether any occurrence of a series can still be followed by another. */
 const seriesActive = (id: string): boolean => Boolean(get("SELECT 1 AS live FROM posts WHERE series_id = ? AND repeat_every IS NOT NULL AND repeat_spawned = 0 LIMIT 1", id));
+
+/** The name a feed goes by: its own title, or its host until it has one. Null when the feed is gone. */
+function feedTitle(id: string): string | null {
+  const feed = get<{ title: string | null; url: string }>("SELECT title, url FROM feeds WHERE id = ?", id);
+  if (!feed) return null;
+  return feed.title || new URL(feed.url).host;
+}
 
 function hydrate(row: PostRow): Post {
   const thread = JSON.parse(row.thread) as string[];
@@ -152,6 +207,8 @@ function hydrate(row: PostRow): Post {
     status: (status === "failed" || status === "cancelled") && targets.some((t) => t.parts[0].status === "published") ? "partial" : status,
     publish_at: row.publish_at,
     origin: row.origin,
+    feed: row.feed_id ? { id: row.feed_id, title: feedTitle(row.feed_id) } : null,
+    held_reason: row.held_reason ?? null,
     created_at: row.created_at,
     updated_at: row.updated_at,
     repeat: row.repeat_every ? { every: row.repeat_every, until: row.repeat_until, timezone: row.repeat_zone } : null,
@@ -165,8 +222,19 @@ export function getPost(id: string): Post | undefined {
   return row && hydrate(row);
 }
 
-export function listPosts(filter: { status?: PostStatus; limit?: number; from?: string; to?: string; tag?: string } = {}): Post[] {
-  const rows = all<PostRow>("SELECT * FROM posts ORDER BY COALESCE(publish_at, created_at) DESC LIMIT 500");
+export function listPosts(filter: { status?: PostStatus; limit?: number; from?: string; to?: string; tag?: string; origin?: string; feed_id?: string } = {}): Post[] {
+  // Where a post came from is a column, so those two filters are applied before the newest 500 are taken, not after.
+  const where: string[] = [];
+  const params: string[] = [];
+  if (filter.origin) {
+    where.push("origin = ?");
+    params.push(filter.origin);
+  }
+  if (filter.feed_id) {
+    where.push("feed_id = ?");
+    params.push(filter.feed_id);
+  }
+  const rows = all<PostRow>(`SELECT * FROM posts ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY COALESCE(publish_at, created_at) DESC LIMIT 500`, ...params);
   // A tag is matched by name, whatever its case.
   const wanted = filter.tag ? tagKey(filter.tag.trim()) : null;
   return rows
@@ -219,8 +287,22 @@ function namedTargets(targets: TargetInput[] | undefined, groupId: string | null
   return groupTargets(groupId);
 }
 
+type Issue = { account_id: string; platform?: string; problems: string[] };
+
 /** Every reason a post cannot go to a target, found before anything is saved or sent. */
 function check(content: string, mediaIds: string[], targets: TargetInput[], thread: string[]) {
+  const { resolved, issues } = fit(content, mediaIds, targets, thread);
+  if (issues.length) {
+    throw new InputError(
+      `This post cannot go out as written: ${issues.map((i) => `${i.platform ?? i.account_id}: ${i.problems.join(" ")}`).join(" | ")}`,
+      issues,
+    );
+  }
+  return resolved.map((r) => r!);
+}
+
+/** Each target with its account, and what is wrong with each. A target whose account is gone resolves to null. */
+function fit(content: string, mediaIds: string[], targets: TargetInput[], thread: string[]) {
   if (!targets.length) throw new InputError("Choose at least one account to post to.");
   const media = mediaIds.map((id) => {
     const found = getMedia(id);
@@ -228,7 +310,7 @@ function check(content: string, mediaIds: string[], targets: TargetInput[], thre
     return found;
   });
   const seen = new Set<string>();
-  const issues: { account_id: string; platform?: string; problems: string[] }[] = [];
+  const issues: Issue[] = [];
   const resolved = targets.map((target) => {
     const account = getAccount(target.account_id);
     if (!account) {
@@ -242,13 +324,7 @@ function check(content: string, mediaIds: string[], targets: TargetInput[], thre
     if (found.length) issues.push({ account_id: account.id, platform: account.platform, problems: found });
     return { account, target };
   });
-  if (issues.length) {
-    throw new InputError(
-      `This post cannot go out as written: ${issues.map((i) => `${i.platform ?? i.account_id}: ${i.problems.join(" ")}`).join(" | ")}`,
-      issues,
-    );
-  }
-  return resolved.map((r) => r!);
+  return { resolved, issues };
 }
 
 function addTarget(postId: string, account: { id: string; platform: string; handle: string }, target: { content_override?: string | null; options?: Record<string, unknown> }, status: TargetStatus): void {
@@ -265,7 +341,7 @@ function addTarget(postId: string, account: { id: string; platform: string; hand
   );
 }
 
-export async function createPost(input: PostInput, fetcher: typeof fetch = fetch): Promise<Post> {
+export async function createPost(input: PostInput, fetcher: typeof fetch = fetch, internal: Internal = {}): Promise<Post> {
   if (input.idempotency_key) {
     const existing = get<{ id: string }>("SELECT id FROM posts WHERE idempotency_key = ?", input.idempotency_key);
     if (existing) return getPost(existing.id)!;
@@ -274,24 +350,39 @@ export async function createPost(input: PostInput, fetcher: typeof fetch = fetch
   const mediaIds = input.media_ids ?? [];
   const thread = parseThread(input.thread);
   const tags = parseTags(input.tags);
-  const resolved = check(content, mediaIds, namedTargets(input.targets, input.group_id) ?? [], thread);
+  const named = namedTargets(input.targets, input.group_id) ?? [];
+  // A post that does not fit is refused. One made from a feed item is kept instead, as a draft that says why,
+  // so nothing is trimmed and nothing is lost; it cannot go out until it has been changed to fit.
+  let held: string | null = null;
+  let resolved: ReturnType<typeof check>;
+  if (internal.hold) {
+    const found = fit(content, mediaIds, named, thread);
+    resolved = found.resolved.filter((r): r is NonNullable<typeof r> => r !== null).filter((r, i, list) => list.findIndex((other) => other.account.id === r.account.id) === i);
+    if (!resolved.length) throw new InputError("None of the chosen accounts is connected any more.");
+    const unfit = found.issues.filter((issue) => issue.platform);
+    if (unfit.length) held = [...new Set(unfit.flatMap((issue) => issue.problems))].join(" ");
+  } else {
+    resolved = check(content, mediaIds, named, thread);
+  }
   const publishAt = parseWhen(input.publish_at);
   const repeat = parseRepeat(input.repeat, publishAt);
   const later = publishAt !== null && new Date(publishAt).getTime() > Date.now() + 1000;
-  const status: TargetStatus = input.draft ? "draft" : later ? "scheduled" : "pending";
+  const status: TargetStatus = input.draft || held ? "draft" : later ? "scheduled" : "pending";
   const id = newId("post");
   const stamp = now();
   const database = db();
   database.exec("BEGIN");
   try {
     run(
-      "INSERT INTO posts (id, content, media, thread, publish_at, origin, idempotency_key, series_id, repeat_every, repeat_until, repeat_zone, repeat_anchor, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      "INSERT INTO posts (id, content, media, thread, publish_at, origin, feed_id, held_reason, idempotency_key, series_id, repeat_every, repeat_until, repeat_zone, repeat_anchor, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       id,
       content,
       JSON.stringify(mediaIds),
       JSON.stringify(thread),
       publishAt,
-      input.origin ?? "api",
+      internal.feed_id ? "feed" : (input.origin ?? "api"),
+      internal.feed_id ?? null,
+      held,
       input.idempotency_key ?? null,
       repeat ? newId("ser") : null,
       repeat?.every ?? null,
@@ -308,6 +399,7 @@ export async function createPost(input: PostInput, fetcher: typeof fetch = fetch
     database.exec("ROLLBACK");
     throw error;
   }
+  if (status === "scheduled") announce("post.scheduled", id);
   if (status === "pending") await publishPending(id, fetcher);
   return getPost(id)!;
 }
@@ -337,12 +429,22 @@ export async function publishTarget(targetId: string, fetcher: typeof fetch = fe
   if (post.repeat) lineUpNext(post.id);
   const texts = [target.content_override ?? post.content, ...post.thread];
   const sent = JSON.parse(target.parts) as PartRef[];
+  let settled = false;
+  /** This try's last word: the post's time moves on, then the outgoing webhooks hear what happened, with the post as it now stands. */
+  const settle = (failed: boolean) => {
+    if (settled) return;
+    settled = true;
+    run("UPDATE posts SET updated_at = ? WHERE id = ?", now(), target.post_id);
+    if (failed) announce("target.failed", target.post_id, targetId);
+    announceOutcome(target.post_id);
+  };
   const fail = (message: string, retryable = false) => {
     if (retryable && target.attempts < MAX_ATTEMPTS) {
       const next = new Date(Date.now() + 30_000 * 2 ** (target.attempts - 1)).toISOString();
       run("UPDATE targets SET status = 'retrying', error = ?, next_attempt_at = ? WHERE id = ?", message, next, targetId);
     } else {
       run("UPDATE targets SET status = 'failed', error = ? WHERE id = ?", message, targetId);
+      settle(true);
     }
   };
   const c = connector(target.platform);
@@ -379,7 +481,7 @@ export async function publishTarget(targetId: string, fetcher: typeof fetch = fe
     fail(message, known && error.retryable);
     if (known && (error.reconnect || /\b40[13]\b/.test(reason))) markAccount(target.account_id, reason);
   }
-  run("UPDATE posts SET updated_at = ? WHERE id = ?", now(), target.post_id);
+  settle(false);
 }
 
 /**
@@ -391,6 +493,7 @@ export async function publishTarget(targetId: string, fetcher: typeof fetch = fe
  */
 function lineUpNext(postId: string): void {
   const database = db();
+  let created: string | null = null;
   database.exec("BEGIN IMMEDIATE");
   try {
     const claimed = run("UPDATE posts SET repeat_spawned = 1 WHERE id = ? AND repeat_spawned = 0 AND repeat_every IS NOT NULL AND repeat_anchor IS NOT NULL", postId);
@@ -420,13 +523,16 @@ function lineUpNext(postId: string): void {
       );
       for (const t of targets) addTarget(id, { id: t.account_id, platform: t.platform, handle: t.handle }, { content_override: t.content_override, options: JSON.parse(t.options) }, "scheduled");
       copyPostTags(postId, id);
+      created = id;
     }
     database.exec("COMMIT");
   } catch (error) {
     database.exec("ROLLBACK");
     // The flag is rolled back with the rest, so the next target or tick tries again; the post in hand still goes out.
     console.error("[broadside] could not line up the next occurrence:", error);
+    created = null;
   }
+  if (created) announce("post.scheduled", created);
 }
 
 function editable(post: Post): void {
@@ -468,7 +574,8 @@ export async function updatePost(
   database.exec("BEGIN");
   try {
     run(
-      "UPDATE posts SET content = ?, media = ?, thread = ?, publish_at = ?, series_id = ?, repeat_every = ?, repeat_until = ?, repeat_zone = ?, repeat_anchor = ?, repeat_count = ?, updated_at = ? WHERE id = ?",
+      // The edit passed every network's rules above, so a draft that was held for not fitting is held no longer.
+      "UPDATE posts SET content = ?, media = ?, thread = ?, publish_at = ?, series_id = ?, repeat_every = ?, repeat_until = ?, repeat_zone = ?, repeat_anchor = ?, repeat_count = ?, held_reason = NULL, updated_at = ? WHERE id = ?",
       content,
       JSON.stringify(mediaIds),
       JSON.stringify(thread),
@@ -490,6 +597,7 @@ export async function updatePost(
     database.exec("ROLLBACK");
     throw error;
   }
+  if (status === "scheduled") announce("post.scheduled", id);
   if (status === "pending") await publishPending(id, fetcher);
   return getPost(id)!;
 }
@@ -499,6 +607,11 @@ export async function publishNow(id: string, fetcher: typeof fetch = fetch): Pro
   const post = getPost(id);
   if (!post) throw new InputError(`No post with id ${id}.`);
   editable(post);
+  // A draft held because it did not fit was saved without passing the rules, so it meets them here before anything is sent.
+  if (post.held_reason) {
+    check(post.content, post.media.map((m) => m.id), post.targets.map((t) => ({ account_id: t.account_id, content_override: t.content_override, options: t.options })), post.thread);
+    run("UPDATE posts SET held_reason = NULL WHERE id = ?", id);
+  }
   run("UPDATE targets SET status = 'pending' WHERE post_id = ? AND status IN ('draft', 'scheduled')", id);
   run("UPDATE posts SET publish_at = ?, updated_at = ? WHERE id = ?", now(), now(), id);
   await publishPending(id, fetcher);
@@ -563,12 +676,17 @@ export function dueTargets(at = now()): string[] {
  * left for a person to retry.
  */
 export function recoverInterrupted(): number {
-  const stuck = all<{ id: string; parts_done: number; thread: string }>("SELECT t.id, t.parts_done, p.thread FROM targets t JOIN posts p ON p.id = t.post_id WHERE t.status = 'publishing'");
+  const stuck = all<{ id: string; post_id: string; parts_done: number; thread: string }>("SELECT t.id, t.post_id, t.parts_done, p.thread FROM targets t JOIN posts p ON p.id = t.post_id WHERE t.status = 'publishing'");
   let failed = 0;
   for (const target of stuck) {
     const total = (JSON.parse(target.thread) as string[]).length + 1;
     const what = total > 1 ? `part ${target.parts_done + 1} of ${total}` : "this";
-    failed += run("UPDATE targets SET status = 'failed', error = ? WHERE id = ? AND status = 'publishing'", `Broadside stopped while ${what} was being sent. Check the network before retrying, in case it went out.`, target.id);
+    const changed = run("UPDATE targets SET status = 'failed', error = ? WHERE id = ? AND status = 'publishing'", `Broadside stopped while ${what} was being sent. Check the network before retrying, in case it went out.`, target.id);
+    failed += changed;
+    if (changed) {
+      announce("target.failed", target.post_id, target.id);
+      announceOutcome(target.post_id);
+    }
   }
   return failed;
 }
