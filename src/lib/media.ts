@@ -118,7 +118,37 @@ export function getMedia(id: string): Media | undefined {
 }
 
 export function listMedia(limit = 60): Media[] {
-  return all<MediaRow>("SELECT * FROM media ORDER BY created_at DESC LIMIT ?", limit).map(view);
+  return all<MediaRow>("SELECT * FROM media ORDER BY created_at DESC, rowid DESC LIMIT ?", limit).map(view);
+}
+
+/** One post that carries a file. `waiting` is true while any part of that post has yet to go out. */
+export type MediaUse = { post_id: string; excerpt: string; waiting: boolean };
+export type LibraryItem = Media & { used_by: MediaUse[] };
+
+/** A target in one of these states may still send the post's media: it is a draft, is scheduled, is on its way out, or failed and can be retried. */
+const WAITING = "('draft', 'scheduled', 'pending', 'publishing', 'retrying', 'failed')";
+
+const USES = `
+  SELECT DISTINCT j.value AS media_id, p.id AS post_id, COALESCE(p.publish_at, p.created_at) AS at, substr(p.content, 1, 80) AS excerpt,
+    EXISTS (SELECT 1 FROM targets t WHERE t.post_id = p.id AND t.status IN ${WAITING}) AS waiting
+  FROM posts p, json_each(p.media) j`;
+
+type UseRow = { media_id: string; post_id: string; excerpt: string; waiting: number };
+
+const asUse = (row: UseRow): MediaUse => ({ post_id: row.post_id, excerpt: row.excerpt, waiting: row.waiting === 1 });
+
+/** The posts that carry this file, newest first. */
+export function mediaUses(id: string): MediaUse[] {
+  if (!isId(id)) return [];
+  return all<UseRow>(`${USES} WHERE j.value = ? ORDER BY at DESC`, id).map(asUse);
+}
+
+/** Everything in the library, newest first, each with the posts that use it. */
+export function listLibrary(limit = 200): LibraryItem[] {
+  const uses = new Map<string, MediaUse[]>();
+  for (const row of all<UseRow>(`${USES} ORDER BY at DESC`)) uses.set(row.media_id, [...(uses.get(row.media_id) ?? []), asUse(row)]);
+  const capped = Math.min(Math.max(1, Math.floor(limit) || 200), 1000);
+  return listMedia(capped).map((media) => ({ ...media, used_by: uses.get(media.id) ?? [] }));
 }
 
 export function setAlt(id: string, alt: string): Media {
@@ -137,9 +167,22 @@ export function streamMedia(id: string): ReadableStream<Uint8Array> {
   return Readable.toWeb(createReadStream(path.join(folder(), id))) as ReadableStream<Uint8Array>;
 }
 
-/** The record goes first, and a file is only removed when a record for exactly that id existed. */
+/**
+ * The record goes first, and a file is only removed when a record for exactly that id existed.
+ * A file that a post has yet to send is kept (a draft, a scheduled post, or one that failed and
+ * can be retried): deleting it would send that post out without its picture. Once every post
+ * that used it has gone out, it may be deleted.
+ */
 export function deleteMedia(id: string): boolean {
   if (!isId(id)) return false;
+  const waiting = mediaUses(id).filter((use) => use.waiting);
+  if (waiting.length) {
+    const one = waiting.length === 1;
+    throw new InputError(
+      `${waiting.length} ${one ? "post that has not gone out yet still uses" : "posts that have not gone out yet still use"} this file. Edit or remove ${one ? "that post" : "those posts"} first, or delete the file once ${one ? "it is" : "they are"} published.`,
+      { post_ids: waiting.map((use) => use.post_id) },
+    );
+  }
   if (!run("DELETE FROM media WHERE id = ?", id)) return false;
   rmSync(path.join(folder(), id), { force: true });
   return true;

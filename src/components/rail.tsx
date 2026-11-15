@@ -8,11 +8,12 @@ const LINKS = [
   { href: "/app", label: "Compose", icon: "compose" },
   { href: "/app/posts", label: "Posts", icon: "posts" },
   { href: "/app/calendar", label: "Calendar", icon: "calendar" },
+  { href: "/app/media", label: "Media", icon: "image" },
   { href: "/app/accounts", label: "Accounts", icon: "accounts" },
   { href: "/app/connect", label: "Connect", icon: "connect" },
 ];
 
-/** A side rail on wide screens, a bottom bar on a phone: the same five places, where a thumb or a pointer expects them. */
+/** A side rail on wide screens, a bottom bar on a phone: the same six places, where a thumb or a pointer expects them. */
 export function Rail({ canSignOut = false }: { canSignOut?: boolean }) {
   const pathname = usePathname();
   const signOut = async () => {
@@ -50,7 +51,7 @@ export function Rail({ canSignOut = false }: { canSignOut?: boolean }) {
             key={link.href}
             href={link.href}
             aria-current={pathname === link.href ? "page" : undefined}
-            className="flex min-h-12 min-w-14 flex-col items-center justify-center gap-0.5 rounded-md text-xs font-medium text-ink-2 aria-[current=page]:text-signal"
+            className="flex min-h-12 min-w-0 flex-1 flex-col items-center justify-center gap-0.5 rounded-md text-xs font-medium text-ink-2 aria-[current=page]:text-signal"
           >
             <Icon name={link.icon} size={20} />
             {link.label}

@@ -2,9 +2,11 @@
 
 import Link from "next/link";
 import { useMemo, useState } from "react";
+import { tagKey } from "@/lib/tag-rules";
+import { TagFilter, TagList } from "./tags";
 import { Stamp, Status, useHydrated } from "./ui";
 
-type Entry = { id: string; content: string; status: string; at: string; platforms: string[] };
+type Entry = { id: string; content: string; status: string; at: string; platforms: string[]; tags: string[] };
 
 const dayKey = (d: Date) => `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
 const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
@@ -23,9 +25,18 @@ export function Calendar({ posts }: { posts: Entry[] }) {
   return <Month posts={posts} />;
 }
 
-function Month({ posts }: { posts: Entry[] }) {
+function Month({ posts: every }: { posts: Entry[] }) {
   const [cursor, setCursor] = useState(() => new Date(new Date().getFullYear(), new Date().getMonth(), 1));
   const [picked, setPicked] = useState(() => dayKey(new Date()));
+  const [tag, setTag] = useState<string | null>(null);
+  // The tags on the posts in hand, each once, in alphabetical order.
+  const tags = useMemo(() => {
+    const seen = new Map<string, string>();
+    for (const post of every) for (const name of post.tags) if (!seen.has(tagKey(name))) seen.set(tagKey(name), name);
+    return [...seen.values()].sort((a, b) => tagKey(a).localeCompare(tagKey(b)));
+  }, [every]);
+  const filterTag = tag !== null && tags.some((name) => tagKey(name) === tagKey(tag)) ? tag : null;
+  const posts = useMemo(() => (filterTag === null ? every : every.filter((post) => post.tags.some((name) => tagKey(name) === tagKey(filterTag)))), [every, filterTag]);
 
   const byDay = useMemo(() => {
     const map = new Map<string, Entry[]>();
@@ -67,6 +78,12 @@ function Month({ posts }: { posts: Entry[] }) {
           </button>
         </div>
       </div>
+
+      {tags.length ? (
+        <div className="mt-4">
+          <TagFilter tags={tags} value={filterTag} onChange={setTag} />
+        </div>
+      ) : null}
 
       <div className="mt-6 grid gap-6 xl:grid-cols-[minmax(0,7fr)_minmax(0,4fr)]">
         <div className="panel overflow-hidden p-2">
@@ -110,7 +127,7 @@ function Month({ posts }: { posts: Entry[] }) {
           <h2 className="title text-xl">{pickedLabel}</h2>
           {list.length === 0 ? (
             <div className="panel mt-3 p-6">
-              <p className="note">Nothing on this day.</p>
+              <p className="note">{filterTag === null ? "Nothing on this day." : `Nothing tagged ${filterTag} on this day.`}</p>
               <Link className="btn btn-sm mt-4" href="/app">
                 Write a post
               </Link>
@@ -125,6 +142,11 @@ function Month({ posts }: { posts: Entry[] }) {
                       <Status status={post.status} />
                     </span>
                     <span className="mt-2 line-clamp-3 text-[15px] leading-snug">{post.content || "No text"}</span>
+                    {post.tags.length ? (
+                      <span className="mt-2 block">
+                        <TagList tags={post.tags} />
+                      </span>
+                    ) : null}
                     <span className="mt-3 flex gap-1" aria-hidden="true">
                       {post.platforms.map((p, i) => (
                         <Stamp key={`${p}-${i}`} platform={p} />

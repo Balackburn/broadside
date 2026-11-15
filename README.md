@@ -16,6 +16,13 @@ A post can carry a thread: extra parts published in order after the main text, e
 
 A scheduled post can repeat every day, week or month, with an optional end date. Each time an occurrence goes out, the next is created as its own scheduled post, so you can edit or cancel one without touching the rest, or stop the whole series.
 
+Four things keep a busy install in order:
+
+- **Media library.** Everything you upload or import by link is kept under **Media**, newest first, with its type, size, description and the posts that use it. Attach a file to as many posts as you like with **Choose from library** in the composer. A file that a draft, a scheduled post or a failed post still needs cannot be deleted, and Broadside says how many posts hold it; once those posts are out, it can go.
+- **Tags.** A post can carry short names such as `launch` or `weekly`. Type a new one in the composer or pick an existing one, then filter **Posts** and **Calendar** by tag. Renaming a tag renames it on every post. Deleting a tag takes it off its posts and deletes no post. Tags are never published.
+- **Account groups.** A group is a named set of connected accounts, such as "Launch day". Make groups under **Accounts**; picking one in the composer selects exactly its accounts. Disconnect an account and its groups have one fewer member.
+- **Signatures.** A signature is saved text for the end of a post: a sign-off or a set of hashtags. **Add signature** in the composer puts it into the post text, where you can edit it and it counts toward every network's limit. An account can have a default signature. The composer offers it for that account and adds it only when you ask.
+
 It is also an MCP server. Claude, Cursor, Codex and other MCP clients can list accounts, check a post, publish, schedule and confirm delivery. You type credentials into Broadside, so they stay out of the chat.
 
 It runs as one Node process with one SQLite file. There is no queue, no database server and no account with anyone.
@@ -58,7 +65,9 @@ Any Streamable HTTP client works with the same URL and header. A local stdio ser
 { "mcpServers": { "broadside": { "command": "npx", "args": ["tsx", "/path/to/broadside/bin/broadside-mcp.ts"] } } }
 ```
 
-Tools: `list_platforms`, `list_accounts`, `connect_account`, `disconnect_account`, `upload_media`, `list_media`, `check_post`, `create_post`, `get_post`, `list_posts`, `update_post`, `publish_post`, `cancel_post`, `stop_series`, `retry_target`, `delete_post`.
+Tools: `list_platforms`, `list_accounts`, `list_groups`, `connect_account`, `disconnect_account`, `upload_media`, `list_media`, `list_tags`, `list_signatures`, `check_post`, `create_post`, `get_post`, `list_posts`, `update_post`, `publish_post`, `cancel_post`, `stop_series`, `retry_target`, `delete_post`.
+
+`create_post` and `update_post` take `tags`, and `group_id` in place of `targets` to post to a saved group. `check_post` takes `group_id` too, and `list_posts` filters by `tag`. A signature is text: an agent that wants one reads it from `list_signatures` and puts it at the end of the post itself.
 
 ## REST API
 
@@ -72,13 +81,18 @@ curl http://localhost:3000/api/v1/posts \
 
 Add `"thread": ["second part", "third part"]` for a thread, and `"repeat": {"every": "week", "until": "2027-06-30", "timezone": "Europe/Paris"}` to repeat a scheduled post (`every` is `day`, `week` or `month`; `until` and `timezone` are optional). A post comes back with its `thread`, its `repeat` and `series`, and for each target a `parts` list with the status and url of every part.
 
+Add `"tags": ["launch", "weekly"]` to tag a post; a tag that does not exist yet is created, and a post comes back with its `tags`. Send `"group_id": "grp_…"` instead of `targets` to post to every account in a group. `GET /posts?tag=launch` lists the posts carrying a tag.
+
 | Method and path | Does |
 | --- | --- |
 | `GET /platforms` | Networks, limits and credential fields |
-| `GET, POST /accounts` · `DELETE /accounts/{id}` | Connected accounts. `POST` takes `{"platform", "credentials"}` with tokens you made yourself |
+| `GET, POST /accounts` · `PATCH, DELETE /accounts/{id}` | Connected accounts. `POST` takes `{"platform", "credentials"}` with tokens you made yourself. `PATCH` takes `{"signature_id"}` to set the signature an account offers by default, or `null` to clear it |
 | `POST /oauth/{platform}/start` | Begin a sign-in with your app's id and secret; returns the address to open in a browser |
 | `GET, POST /oauth/choices/{id}` | After a sign-in that ends in a choice: what is on offer, and `{"choices": [ids]}` to connect them |
-| `GET, POST /media` · `PATCH, DELETE /media/{id}` | Upload (multipart `file`) or import (`{"url"}`), set alt text |
+| `GET, POST /media` · `PATCH, DELETE /media/{id}` | The library, newest first, each file with the posts that use it (`used_by`). Upload (multipart `file`) or import (`{"url"}`), set alt text. `DELETE` is refused while a post that has not gone out still uses the file |
+| `GET, POST /tags` · `PATCH, DELETE /tags/{id}` | Tags with how many posts carry each. `POST` and `PATCH` take `{"name"}`. `DELETE` takes the tag off its posts and deletes no post |
+| `GET, POST /groups` · `GET, PATCH, DELETE /groups/{id}` | Account groups. `POST` and `PATCH` take `{"name", "account_ids"}` |
+| `GET, POST /signatures` · `PATCH, DELETE /signatures/{id}` | Saved signatures. `POST` and `PATCH` take `{"name", "content", "default_for"}`, where `default_for` lists the accounts that offer it by default |
 | `POST /check` | Dry run against each account's rules |
 | `GET, POST /posts` · `GET, PATCH, DELETE /posts/{id}` | Create (send an `Idempotency-Key` header), read, edit |
 | `POST /posts/{id}/publish` · `/cancel` · `/targets/{targetId}/retry` | Act on a post. `/cancel` with `{"series": true}` stops a whole repeating series |
@@ -173,6 +187,7 @@ To put Broadside on the internet, keep it on `127.0.0.1` and publish it through 
 - `src/lib/platforms/` holds one connector per network: its credential fields, limits and the HTTP calls that publish. Connectors never touch the database, so each is tested with a fake `fetch`.
 - `src/lib/posts.ts` is the engine: validate, fan out, record a status per target, retry transient failures. A target is claimed with a compare-and-set before it is sent, so two clocks can never post it twice, and a target interrupted mid-send is failed rather than resent. A thread is recorded part by part, so a retry continues where it stopped, and the next occurrence of a repeating post is created under the same kind of claim, exactly once.
 - `src/lib/oauth.ts` is the sign-in every network shares. Each connector describes its own network in an `oauth` block: where to approve, the scopes, the style of PKCE, how the code is exchanged and what is stored. `src/lib/platforms/oauth2.ts` renews tokens before a post and hands rotated ones back to be saved.
+- `src/lib/tags.ts`, `src/lib/groups.ts` and `src/lib/signatures.ts` hold tags, account groups and signatures. Their tables are created by the same additive migration as every column added since the first release, so an existing database gains them and keeps its data.
 - `src/lib/mcp.ts` defines the tools once; `/mcp` (HTTP) and `bin/broadside-mcp.ts` (stdio) both serve them.
 - `src/lib/scheduler.ts` is an in-process clock started with the server.
 

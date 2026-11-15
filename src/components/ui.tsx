@@ -49,6 +49,7 @@ const paths: Record<string, ReactNode> = {
   connect: <path d="M9 4v5M15 4v5M6 9h12v3a6 6 0 0 1-12 0V9ZM12 18v3" />,
   plus: <path d="M12 5v14M5 12h14" />,
   image: <path d="M4 5h16v14H4zM4 15l4.5-4.5 4 4 2.5-2.5L20 17M15 9.5h.01" />,
+  library: <path d="M8 4h12v12H8zM4 8v12h12M8 13l3.5-3.5 3 3 2-2L20 13.5" />,
   clock: <path d="M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18ZM12 7v5l3 2" />,
   close: <path d="M6 6l12 12M18 6 6 18" />,
   copy: <path d="M9 9h10v11H9zM5 15V4h10" />,
@@ -139,7 +140,11 @@ export function Dialog({ open, onClose, title, children }: { open: boolean; onCl
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
-    if (open && !el.open) el.showModal();
+    if (open && !el.open) {
+      el.showModal();
+      // showModal puts focus on the first control, which is Close. A dialog that opens to be typed in marks its field instead.
+      el.querySelector<HTMLElement>("[data-autofocus]")?.focus();
+    }
     if (!open && el.open) el.close();
   }, [open]);
   return (

@@ -12,6 +12,8 @@ export type Account = {
   avatar_url: string | null;
   status: "active" | "needs_attention";
   last_error: string | null;
+  /** The saved signature the composer offers for this account, if it has one. */
+  signature_id: string | null;
   created_at: string;
 };
 
@@ -19,8 +21,8 @@ type AccountRow = Account & { credentials: string };
 
 /** Everything about an account except its credentials, which never leave the server. */
 function publicView(row: AccountRow): Account {
-  const { id, platform, label, handle, avatar_url, status, last_error, created_at } = row;
-  return { id, platform, label, handle, avatar_url, status, last_error, created_at };
+  const { id, platform, label, handle, avatar_url, status, last_error, signature_id, created_at } = row;
+  return { id, platform, label, handle, avatar_url, status, last_error, signature_id: signature_id ?? null, created_at };
 }
 
 export class InputError extends Error {

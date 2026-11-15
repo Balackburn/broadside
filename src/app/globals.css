@@ -365,6 +365,98 @@
     box-shadow: none;
   }
 
+  /* A tag: a short name a post carries. Quieter than an account chip; as a button it filters or comes off, and presses like one. */
+  .tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    max-width: 100%;
+    min-height: 22px;
+    padding: 0 8px;
+    border-radius: 999px;
+    background: var(--paper-2);
+    box-shadow: inset 0 0 0 1px var(--line);
+    color: var(--ink-2);
+    font-size: 12.5px;
+    font-weight: 500;
+    line-height: 1.2;
+    white-space: nowrap;
+  }
+  button.tag {
+    min-height: 28px;
+    padding: 0 10px;
+    font-size: 13px;
+    cursor: pointer;
+    transition:
+      transform var(--duration-quick) var(--ease-out),
+      background-color var(--duration-quick) ease,
+      color var(--duration-quick) ease;
+  }
+  button.tag:active {
+    transform: scale(0.97);
+  }
+  button.tag:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+    transform: none;
+  }
+  button.tag[aria-pressed="true"] {
+    background: var(--ink);
+    color: var(--paper);
+    box-shadow: none;
+  }
+  @media (hover: hover) and (pointer: fine) {
+    button.tag:not([aria-pressed="true"]):not(:disabled):hover {
+      background: var(--paper-3);
+      color: var(--ink);
+    }
+    .chip:not([aria-pressed="true"]):hover {
+      background: var(--paper-2);
+    }
+  }
+
+  /* A picture in the media library or the picker: the file fills its frame, and a pressed one is ringed. */
+  .thumb {
+    position: relative;
+    display: block;
+    width: 100%;
+    aspect-ratio: 4 / 3;
+    overflow: hidden;
+    border-radius: var(--r-1);
+    background: var(--paper-2);
+    box-shadow: inset 0 0 0 1px var(--line);
+  }
+  .thumb > img,
+  .thumb > video {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+  a.thumb,
+  button.thumb {
+    cursor: pointer;
+    transition:
+      transform var(--duration-quick) var(--ease-out),
+      opacity var(--duration-quick) ease;
+  }
+  a.thumb:active,
+  button.thumb:active {
+    transform: scale(0.97);
+  }
+  button.thumb[aria-pressed="true"]::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    box-shadow: inset 0 0 0 3px var(--signal);
+  }
+  @media (hover: hover) and (pointer: fine) {
+    a.thumb:hover,
+    button.thumb:hover {
+      opacity: 0.85;
+    }
+  }
+
   /* Segmented tabs with a sliding pill (transitions.dev: tabs sliding). */
   .tabs {
     position: relative;

@@ -348,7 +348,7 @@ try {
   await client.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp`), { requestInit: { headers: { authorization: `Bearer ${token}` } } }));
   ok(client.getServerVersion().name === "broadside", "An MCP client completes the handshake over HTTP");
   const tools = (await client.listTools()).tools.map((t) => t.name).sort();
-  const expected = ["cancel_post", "check_post", "connect_account", "create_post", "delete_post", "disconnect_account", "get_post", "list_accounts", "list_media", "list_platforms", "list_posts", "publish_post", "retry_target", "stop_series", "update_post", "upload_media"];
+  const expected = ["cancel_post", "check_post", "connect_account", "create_post", "delete_post", "disconnect_account", "get_post", "list_accounts", "list_groups", "list_media", "list_platforms", "list_posts", "list_signatures", "list_tags", "publish_post", "retry_target", "stop_series", "update_post", "upload_media"];
   ok(expected.every((name) => tools.includes(name)), `The server offers its ${expected.length} tools`, `got ${tools.join(", ")}`);
   const call = async (name, args = {}) => client.callTool({ name, arguments: args });
 
@@ -577,6 +577,7 @@ try {
     ["/app", "Compose"],
     ["/app/posts", "Posts"],
     ["/app/calendar", "Calendar"],
+    ["/app/media", "Media library"],
     ["/app/accounts", "Accounts"],
     ["/app/connect", "/mcp"],
     ["/login", "Sign in"],
@@ -586,6 +587,209 @@ try {
     const html = await response.text();
     ok(response.status === 200 && html.includes(marker), `Page ${pathname} renders`, `status ${response.status}`);
   }
+  // Organising: the media library, tags, account groups and signatures
+  const page = (pathname) => fetch(`${base}${pathname}`).then((r) => r.text());
+  const via = async (method, pathname, payload) => api(`/api/v1${pathname}`, { method, headers: auth, body: payload === undefined ? undefined : JSON.stringify(payload) });
+  const inAnHour = () => new Date(Date.now() + 3600000).toISOString();
+
+  // Media library
+  const uploadFile = async (name) => {
+    const form = new FormData();
+    form.set("file", new Blob([PNG], { type: "image/png" }), name);
+    return (await fetch(`${base}/api/v1/media`, { method: "POST", headers: { authorization: `Bearer ${token}` }, body: form })).json();
+  };
+  const older = (await uploadFile("verify-older.png")).data;
+  const newer = (await uploadFile("verify-newer.png")).data;
+  const libraryStart = await via("GET", "/media");
+  ok(
+    libraryStart.status === 200 && libraryStart.body.data[0].id === newer.id && libraryStart.body.data[1].id === older.id && libraryStart.body.data[0].used_by.length === 0 && libraryStart.body.data.some((m) => m.id === media.id && m.source_url === `${net}/pixel.png` && m.used_by.length > 0),
+    "REST: the media library lists uploads and imports newest first, each with the posts that use it",
+  );
+  const mediaDraft = await via("POST", "/posts", { content: "verify: a draft with a picture", targets: [{ account_id: ids.sandbox }], media_ids: [older.id], draft: true });
+  const mediaScheduled = await via("POST", "/posts", { content: "verify: scheduled with a picture", targets: [{ account_id: ids.sandbox }], media_ids: [older.id], publish_at: inAnHour() });
+  const keptOne = await via("DELETE", `/media/${older.id}`);
+  ok(
+    keptOne.status === 400 && /^2 posts that have not gone out yet still use this file\./.test(keptOne.body.error.message) && keptOne.body.error.details.post_ids.length === 2 && (await fetch(`${base}${older.url}`)).status === 200,
+    "REST: deleting media that a draft and a scheduled post still use is refused, naming how many posts, and the file stays",
+    JSON.stringify(keptOne.body),
+  );
+  const described = await via("PATCH", `/media/${older.id}`, { alt: "A single verify pixel" });
+  const libraryPage = await page("/app/media");
+  ok(
+    described.body.data.alt === "A single verify pixel" && libraryPage.includes("verify-older.png") && libraryPage.includes("verify-newer.png") && libraryPage.includes("A single verify pixel") && libraryPage.includes("Used in 2 posts") && libraryPage.includes("PNG image") && libraryPage.includes("Not used in a post yet.") && libraryPage.includes("Upload") && libraryPage.includes("Import"),
+    "The media page shows each file with its type, size, description and where it is used, with upload and import",
+  );
+  ok(libraryPage.indexOf("verify-newer.png") < libraryPage.indexOf("verify-older.png"), "The media page lists the newest file first");
+  await via("POST", `/posts/${mediaDraft.body.data.id}/publish`);
+  const stillOne = await via("DELETE", `/media/${older.id}`);
+  await via("PATCH", `/posts/${mediaScheduled.body.data.id}`, { media_ids: [] });
+  const gone = await via("DELETE", `/media/${older.id}`);
+  const afterDelete = await via("GET", `/posts/${mediaDraft.body.data.id}`);
+  ok(
+    /^1 post that has not gone out yet still uses this file\./.test(stillOne.body.error?.message ?? "") && gone.status === 200 && (await fetch(`${base}${older.url}`)).status === 404 && afterDelete.body.data.status === "published" && afterDelete.body.data.media.length === 0,
+    "REST: once only a published post uses the file it can be deleted, and the post keeps its record",
+    JSON.stringify([stillOne.body, gone.body]),
+  );
+  ok((await via("DELETE", `/media/${newer.id}`)).status === 200, "REST: media no post uses is deleted");
+  const composePage = await page("/app");
+  ok(composePage.includes("Choose from library") && composePage.includes("Add media"), "The composer offers Choose from library beside Add media");
+
+  // Tags
+  const tagged = await via("POST", "/posts", { content: "verify: a tagged post", targets: [{ account_id: ids.sandbox }], tags: ["Verify Launch", "verify weekly"], publish_at: inAnHour() });
+  const taggedAgain = await via("POST", "/posts", { content: "verify: tagged again", targets: [{ account_id: ids.sandbox }], tags: ["verify launch"], draft: true });
+  const tagList = await via("GET", "/tags");
+  const launchTag = tagList.body.data.find((t) => t.name === "Verify Launch");
+  ok(
+    tagged.body.data.tags.join("|") === "Verify Launch|verify weekly" && taggedAgain.body.data.tags.join("|") === "Verify Launch" && launchTag.posts === 2 && tagList.body.data.find((t) => t.name === "verify weekly").posts === 1,
+    "REST: posts accept and return tags, created on the fly and reused whatever their case",
+    JSON.stringify(tagList.body),
+  );
+  const byTag = await api(`/api/v1/posts?tag=${encodeURIComponent("VERIFY LAUNCH")}&limit=100`, { headers: auth });
+  const byOther = await api(`/api/v1/posts?tag=${encodeURIComponent("verify weekly")}&limit=100`, { headers: auth });
+  ok(byTag.body.data.map((p) => p.id).sort().join() === [tagged.body.data.id, taggedAgain.body.data.id].sort().join() && byOther.body.data.length === 1 && byOther.body.data[0].id === tagged.body.data.id, "REST: GET /posts filters by tag");
+  const editTagged = await page(`/app?edit=${tagged.body.data.id}`);
+  ok(editTagged.includes("Edit post") && editTagged.includes("Remove the tag Verify Launch") && editTagged.includes("Remove the tag verify weekly"), "Opening a post for editing loads its tags into the composer");
+  const retagged = await via("PATCH", `/posts/${taggedAgain.body.data.id}`, { tags: ["Verify Launch", "verify extra"] });
+  const untouched = await via("PATCH", `/posts/${taggedAgain.body.data.id}`, { content: "verify: tagged again, reworded" });
+  ok(retagged.body.data.tags.join("|") === "verify extra|Verify Launch" && untouched.body.data.tags.join("|") === "verify extra|Verify Launch", "REST: PATCH replaces a post's tags, and leaves them alone when it does not mention them");
+  const renamed = await via("PATCH", `/tags/${launchTag.id}`, { name: "Verify Release" });
+  const clash = await via("PATCH", `/tags/${launchTag.id}`, { name: "VERIFY WEEKLY" });
+  const afterRename = await via("GET", `/posts/${tagged.body.data.id}`);
+  ok(
+    renamed.body.data.name === "Verify Release" && renamed.body.data.posts === 2 && afterRename.body.data.tags.join("|") === "Verify Release|verify weekly" && clash.status === 400 && /already exists/.test(clash.body.error.message),
+    "REST: renaming a tag renames it on every post, and a name another tag has is refused",
+  );
+  const taggedPosts = await page("/app/posts");
+  ok(taggedPosts.includes("Verify Release") && taggedPosts.includes("Filter by tag") && taggedPosts.includes("Manage tags") && !taggedPosts.includes("Verify Launch"), "The posts page shows tags on posts, the tag filter and Manage tags");
+  const postsBeforeTagDelete = (await api("/api/v1/posts?limit=100", { headers: auth })).body.data.length;
+  const tagDeleted = await via("DELETE", `/tags/${launchTag.id}`);
+  const afterTagDelete = await via("GET", `/posts/${tagged.body.data.id}`);
+  ok(
+    tagDeleted.status === 200 && afterTagDelete.body.data.tags.join("|") === "verify weekly" && afterTagDelete.body.data.content === "verify: a tagged post" && (await api("/api/v1/posts?limit=100", { headers: auth })).body.data.length === postsBeforeTagDelete && !(await via("GET", "/tags")).body.data.some((t) => t.id === launchTag.id),
+    "REST: deleting a tag takes it off its posts and deletes no post",
+  );
+  const badTag = await via("POST", "/posts", { content: "x", targets: [{ account_id: ids.sandbox }], tags: ["one, two"], draft: true });
+  ok(badTag.status === 400 && /cannot contain a comma/.test(badTag.body.error.message), "REST: a tag that is not a short single-line name is refused");
+
+  // Account groups
+  const leaver = (await via("POST", "/accounts", { platform: "sandbox", credentials: { name: "Verify Leaver" } })).body.data.id;
+  const group = await via("POST", "/groups", { name: "Verify launch day", account_ids: [ids.sandbox, ids.mastodon, leaver] });
+  ok(
+    group.status === 200 && /^grp_/.test(group.body.data.id) && group.body.data.account_ids.join() === [ids.sandbox, ids.mastodon, leaver].join() && group.body.data.accounts[1].platform === "mastodon" && !JSON.stringify(group.body).includes(SECRET_TOKEN) && !JSON.stringify(group.body).includes("credentials"),
+    "REST: a group is created with its accounts, and holds no credentials",
+    JSON.stringify(group.body),
+  );
+  const groupPost = await via("POST", "/posts", { content: "verify: to the whole group", group_id: group.body.data.id });
+  ok(
+    groupPost.body.data.status === "published" && groupPost.body.data.targets.map((t) => t.account_id).join() === [ids.sandbox, ids.mastodon, leaver].join() && received.mastodon.at(-1).status === "verify: to the whole group",
+    "REST: a post with group_id goes to exactly the group's accounts",
+    JSON.stringify(groupPost.body),
+  );
+  const groupAndTargets = await via("POST", "/posts", { content: "x", targets: [{ account_id: ids.sandbox }], group_id: group.body.data.id });
+  const noSuchGroup = await via("POST", "/posts", { content: "x", group_id: "grp_nothing" });
+  ok(groupAndTargets.status === 400 && /not both/.test(groupAndTargets.body.error.message) && noSuchGroup.status === 400 && /No group with id grp_nothing/.test(noSuchGroup.body.error.message), "REST: targets together with group_id, or an unknown group, are refused");
+  const groupsPage = await page("/app/accounts");
+  const groupCompose = await page("/app");
+  ok(groupsPage.includes("Verify launch day") && groupsPage.includes("New group") && groupsPage.includes("3 accounts") && groupCompose.includes("Verify launch day"), "The Accounts page lists the group with its accounts, and the composer offers it");
+  await via("DELETE", `/accounts/${leaver}`);
+  const smaller = await via("GET", `/groups/${group.body.data.id}`);
+  const smallerPost = await via("POST", "/posts", { content: "verify: after one left", group_id: group.body.data.id, draft: true });
+  ok(
+    smaller.body.data.account_ids.join() === [ids.sandbox, ids.mastodon].join() && smallerPost.body.data.targets.length === 2 && (await via("GET", "/accounts")).body.data.length === 7,
+    "A group whose account was disconnected has one fewer member, and still names the rest",
+    JSON.stringify(smaller.body),
+  );
+  const regrouped = await via("PATCH", `/groups/${group.body.data.id}`, { name: "Verify dev channels", account_ids: [ids.sandbox, ids.discord] });
+  const dupGroup = await via("POST", "/groups", { name: "verify DEV channels", account_ids: [ids.sandbox] });
+  ok(regrouped.body.data.name === "Verify dev channels" && regrouped.body.data.accounts.map((a) => a.platform).join() === "sandbox,discord" && dupGroup.status === 400, "REST: a group can be renamed and its members replaced, and two groups cannot share a name");
+
+  // Signatures
+  const signature = await via("POST", "/signatures", { name: "Verify sign-off", content: "sent by the verify script #verify", default_for: [ids.mastodon] });
+  const withDefault = (await via("GET", "/accounts")).body.data.find((a) => a.id === ids.mastodon);
+  ok(
+    signature.status === 200 && /^sig_/.test(signature.body.data.id) && signature.body.data.default_for.join() === ids.mastodon && withDefault.signature_id === signature.body.data.id && !JSON.stringify((await via("GET", "/signatures")).body).includes(SECRET_TOKEN),
+    "REST: a signature is saved, and an account can offer it by default",
+    JSON.stringify(signature.body),
+  );
+  const unsigned = await via("POST", "/posts", { content: "verify: no signature was asked for", targets: [{ account_id: ids.mastodon }] });
+  ok(unsigned.body.data.status === "published" && received.mastodon.at(-1).status === "verify: no signature was asked for", "An account's default signature is never added by itself: the network received the text exactly as written");
+  const nearLimit = "s".repeat(480);
+  const signedText = `${nearLimit}\n\n${signature.body.data.content}`;
+  const signedCheck = await via("POST", "/check", { content: signedText, targets: [{ account_id: ids.mastodon }] });
+  const signedPost = await via("POST", "/posts", { content: signedText, targets: [{ account_id: ids.mastodon }] });
+  ok(
+    signedCheck.body.data[0].ok === false && signedCheck.body.data[0].length === 515 && signedPost.status === 400 && /Mastodon allows 500 characters; this is 515/.test(signedPost.body.error.message) && received.mastodon.at(-1).status === "verify: no signature was asked for",
+    "A signature added to a post counts against the network's limit like any other text",
+    JSON.stringify(signedCheck.body),
+  );
+  const signedCompose = await page("/app");
+  const signaturesPage = await page("/app/accounts");
+  ok(
+    signedCompose.includes("Add signature") && signedCompose.includes("This account offers the signature Verify sign-off.") && signedCompose.includes("Add it to this account") && signaturesPage.includes("Verify sign-off") && signaturesPage.includes("sent by the verify script #verify") && signaturesPage.includes("New signature") && signaturesPage.includes("Offered by default for @tester@"),
+    "The composer offers Add signature and the account's default, and the Accounts page lists signatures",
+  );
+  const resigned = await via("PATCH", `/signatures/${signature.body.data.id}`, { content: "sent by verify" });
+  const cleared = await via("PATCH", `/accounts/${ids.mastodon}`, { signature_id: null });
+  const reset = await via("PATCH", `/accounts/${ids.mastodon}`, { signature_id: signature.body.data.id });
+  const unsaved = await via("DELETE", `/signatures/${signature.body.data.id}`);
+  const afterUnsave = (await via("GET", "/accounts")).body.data.find((a) => a.id === ids.mastodon);
+  ok(
+    resigned.body.data.content === "sent by verify" && cleared.body.data.signature_id === null && reset.body.data.signature_id === signature.body.data.id && !("credentials" in reset.body.data) && unsaved.status === 200 && afterUnsave.signature_id === null,
+    "REST: a signature can be edited, set or cleared as an account's default, and deleting it clears the default",
+  );
+  ok(
+    (await api("/api/v1/tags")).status === 401 && (await api("/api/v1/groups")).status === 401 && (await api("/api/v1/signatures")).status === 401 && (await api(`/api/v1/groups/${group.body.data.id}`, { method: "DELETE" })).status === 401,
+    "Tags, groups and signatures refuse a request with no key",
+  );
+
+  // The same four through MCP
+  const organiser = new Client({ name: "verify-organise", version: "1.0.0" });
+  await organiser.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp`), { requestInit: { headers: { authorization: `Bearer ${token}` } } }));
+  const ask = async (name, args = {}) => organiser.callTool({ name, arguments: args });
+  const kept = result(await ask("upload_media", { url: `${net}/pixel.png`, alt: "Kept for the agent" }));
+  const agentSignature = (await via("POST", "/signatures", { name: "Verify agent sign-off", content: "#agents" })).body.data;
+  const mcpGroups = result(await ask("list_groups"));
+  const mcpGroup = mcpGroups.find((g) => g.name === "Verify dev channels");
+  const mcpSignatures = result(await ask("list_signatures"));
+  ok(
+    mcpGroup.account_ids.join() === [ids.sandbox, ids.discord].join() && mcpSignatures.find((s) => s.id === agentSignature.id).content === "#agents" && result(await ask("list_tags")).some((t) => t.name === "verify weekly") && !JSON.stringify([mcpGroups, mcpSignatures]).includes(SECRET_TOKEN),
+    "MCP: list_groups, list_signatures and list_tags return what the app holds, without credentials",
+  );
+  const discordBefore = received.discord.length;
+  const mcpPost = result(await ask("create_post", { content: "verify: an agent posts to a group\n\n#agents", group_id: mcpGroup.id, tags: ["verify agent", "verify weekly"], media_ids: [kept.id] }));
+  ok(
+    mcpPost.status === "published" && mcpPost.targets.map((t) => t.platform).join() === "sandbox,discord" && mcpPost.tags.join("|") === "verify agent|verify weekly" && received.discord.length === discordBefore + 1 && received.discord.at(-1).includes("#agents"),
+    "MCP: create_post with group_id publishes to the group's accounts and carries its tags",
+    JSON.stringify(mcpPost.targets?.map((t) => [t.platform, t.status, t.error]) ?? mcpPost),
+  );
+  const mcpByTag = result(await ask("list_posts", { tag: "Verify Agent" }));
+  ok(mcpByTag.length === 1 && mcpByTag[0].id === mcpPost.id, "MCP: list_posts filters by tag");
+  const mcpDraft = result(await ask("create_post", { content: "verify: an agent's draft", targets: [{ account_id: ids.sandbox }], draft: true }));
+  const mcpEdited = result(await ask("update_post", { post_id: mcpDraft.id, group_id: mcpGroup.id, tags: ["verify agent"] }));
+  const mcpChecked = result(await ask("check_post", { content: "fits", group_id: mcpGroup.id }));
+  const mcpBoth = await ask("create_post", { content: "x", targets: [{ account_id: ids.sandbox }], group_id: mcpGroup.id });
+  ok(
+    mcpEdited.tags.join() === "verify agent" && mcpEdited.targets.map((t) => t.platform).join() === "sandbox,discord" && mcpChecked.map((c) => c.platform).join() === "sandbox,discord" && mcpBoth.isError === true && /not both/.test(mcpBoth.content[0].text),
+    "MCP: update_post takes tags and group_id, check_post takes group_id, and targets with group_id are refused",
+  );
+  const mcpLibrary = result(await ask("list_media"));
+  ok(mcpLibrary.find((m) => m.id === kept.id).used_by.some((u) => u.post_id === mcpPost.id && u.waiting === false), "MCP: list_media shows where a file is used");
+  await organiser.close();
+  const cautious = new Client({ name: "verify-organise-drafts-only", version: "1.0.0" });
+  await cautious.connect(new StdioClientTransport({ command: "npx", args: ["tsx", "bin/broadside-mcp.ts"], cwd: root, env: { ...env, BROADSIDE_PUBLIC_URL: base, BROADSIDE_MCP_DRAFTS_ONLY: "1" } }));
+  const discordHeld = received.discord.length;
+  const heldGroup = result(await cautious.callTool({ name: "create_post", arguments: { content: "verify: an agent's idea for the group", group_id: mcpGroup.id, tags: ["verify held"] } }));
+  const heldPushed = result(await cautious.callTool({ name: "update_post", arguments: { post_id: heldGroup.id, group_id: mcpGroup.id, tags: ["verify held", "verify pushed"], draft: false } }));
+  const heldForced = await cautious.callTool({ name: "publish_post", arguments: { post_id: heldGroup.id } });
+  ok(
+    heldGroup.status === "draft" && heldGroup.targets.length === 2 && heldGroup.tags.join() === "verify held" && heldPushed.status === "draft" && heldPushed.tags.length === 2 && heldForced.isError === true && received.discord.length === discordHeld,
+    "In drafts-only mode a post made with group_id and tags stays a draft, and nothing reaches a network",
+    JSON.stringify([heldGroup.status, heldPushed.status, heldForced.isError]),
+  );
+  await cautious.close();
+  await via("DELETE", `/groups/${group.body.data.id}`);
+  ok((await via("GET", "/groups")).body.data.length === 0 && (await via("GET", "/accounts")).body.data.length === 7, "REST: deleting a group leaves its accounts connected");
+
   // Signing in with a network
   const begun = await api("/api/v1/oauth/tiktok/start", { method: "POST", headers: auth, body: JSON.stringify({ credentials: { client_key: "ck", client_secret: "verify-client-secret" } }) });
   const authorize = new URL(begun.body.data.url);

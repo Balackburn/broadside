@@ -5,10 +5,17 @@ import { useRouter } from "next/navigation";
 import { useMemo, useRef, useState } from "react";
 import { measure, problems, threadProblems } from "@/lib/platforms/measure";
 import type { Limits } from "@/lib/platforms/types";
+import { appendSignature, endsWithSignature } from "@/lib/sign";
+import { MediaPicker } from "./media-library";
+import { addTag, TagPicker } from "./tags";
 import { api, Icon, Stamp, Status, Tabs, useHydrated, useToast, when } from "./ui";
 
 /** `threads` says whether the network can take parts after the main post; `noThread` is its own reason when it cannot. */
-export type ComposerAccount = { id: string; platform: string; name: string; handle: string; limits: Limits; threads: boolean; noThread?: string };
+export type ComposerAccount = { id: string; platform: string; name: string; handle: string; limits: Limits; threads: boolean; noThread?: string; signature_id?: string | null };
+/** A named set of accounts: picking it selects exactly these. */
+export type ComposerGroup = { id: string; name: string; account_ids: string[] };
+/** Saved text that Add signature puts at the end of the post. */
+export type ComposerSignature = { id: string; name: string; content: string };
 type Media = { id: string; type: "image" | "video"; url: string; public_url: string | null; filename: string; alt: string | null };
 type Part = { part: number; status: string; url: string | null };
 type Target = { id: string; account_id: string; platform: string; handle: string; status: string; error: string | null; url: string | null; parts: Part[] };
@@ -33,12 +40,25 @@ export type ComposerInitial = {
   targets: { account_id: string; content_override: string | null }[];
   media: Media[];
   thread: string[];
+  tags: string[];
   repeat: { every: Every; until: string | null } | null;
 };
 
 const localInput = (date: Date) => new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
 
-export function Composer({ accounts, initial }: { accounts: ComposerAccount[]; initial?: ComposerInitial }) {
+export function Composer({
+  accounts,
+  initial,
+  groups = [],
+  signatures = [],
+  knownTags = [],
+}: {
+  accounts: ComposerAccount[];
+  initial?: ComposerInitial;
+  groups?: ComposerGroup[];
+  signatures?: ComposerSignature[];
+  knownTags?: string[];
+}) {
   const router = useRouter();
   const hydrated = useHydrated();
   const { show, toast } = useToast();
@@ -56,6 +76,11 @@ export function Composer({ accounts, initial }: { accounts: ComposerAccount[]; i
   const [thread, setThread] = useState<{ key: number; text: string }[]>(() => (initial?.thread ?? []).map((part, key) => ({ key, text: part })));
   const [repeat, setRepeat] = useState<Repeat>(initial?.repeat?.every ?? "never");
   const [until, setUntil] = useState(() => (initial?.repeat?.until ? localInput(new Date(initial.repeat.until)).slice(0, 10) : ""));
+  const [tags, setTags] = useState<string[]>(initial?.tags ?? []);
+  // What is typed in the tag box and not yet added. It is saved with the post, so a last tag is never lost to a missed Enter.
+  const [tagDraft, setTagDraft] = useState("");
+  const [signing, setSigning] = useState(false);
+  const [library, setLibrary] = useState(false);
   const [busy, setBusy] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [result, setResult] = useState<Post | null>(null);
@@ -75,6 +100,23 @@ export function Composer({ accounts, initial }: { accounts: ComposerAccount[]; i
   const blocked = chosen.filter((a) => issues[a.id].length > 0);
 
   const toggle = (id: string) => setSelected((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]));
+
+  // A group names accounts that may since have been disconnected; only the ones still here count.
+  const membersOf = (group: ComposerGroup) => group.account_ids.filter((id) => accounts.some((a) => a.id === id));
+  const isPicked = (group: ComposerGroup) => {
+    const members = membersOf(group);
+    return members.length > 0 && members.length === selected.length && members.every((id) => selected.includes(id));
+  };
+
+  const signatureOf = (account: ComposerAccount) => signatures.find((s) => s.id === account.signature_id);
+  /** Puts a signature at the end of the shared post, as text to edit like the rest. */
+  function sign(signature: ComposerSignature) {
+    setText((now) => appendSignature(now, signature.content));
+    setSigning(false);
+    show(`Added ${signature.name} to the post. Edit it like any other text.`);
+  }
+  /** Puts an account's default signature at the end of that account's own version, starting one from the shared post if need be. */
+  const signFor = (account: ComposerAccount, signature: ComposerSignature) => setOverrides((o) => ({ ...o, [account.id]: appendSignature(o[account.id] ?? text, signature.content) }));
 
   async function upload(files: FileList | null) {
     if (!files?.length) return;
@@ -109,6 +151,8 @@ export function Composer({ accounts, initial }: { accounts: ComposerAccount[]; i
       setShake((n) => n + 1);
       return show(`${blocked.map((a) => a.name).join(", ")} can’t take this as written. Fix the marked sheets.`);
     }
+    const tagged = addTag(tags, tagDraft);
+    if (tagged.problem) return show(tagged.problem);
     setBusy(true);
     try {
       // Editing replaces the saved post in place; a new post is created otherwise.
@@ -119,6 +163,7 @@ export function Composer({ accounts, initial }: { accounts: ComposerAccount[]; i
           targets: chosen.map((a) => ({ account_id: a.id, content_override: overrides[a.id] ?? undefined })),
           thread: parts,
           media_ids: media.map((m) => m.id),
+          tags: tagged.tags,
           // A draft that came with a time keeps it when it is saved as a draft again.
           publish_at: mode === "later" ? publishAt() : keepsSchedule ? undefined : initial ? null : undefined,
           // Repeat is chosen beside the time. Sending a repeating post now, or parking it as a draft, leaves its series as it was.
@@ -142,6 +187,8 @@ export function Composer({ accounts, initial }: { accounts: ComposerAccount[]; i
     setOverrides({});
     setMedia([]);
     setThread([]);
+    setTags([]);
+    setTagDraft("");
     setRepeat("never");
     setUntil("");
     setMode("now");
@@ -210,11 +257,33 @@ export function Composer({ accounts, initial }: { accounts: ComposerAccount[]; i
   const action = busy ? (mode === "now" ? "Sending" : "Saving") : mode === "draft" ? "Save draft" : mode === "later" ? `Schedule for ${count} account${count === 1 ? "" : "s"}` : `Publish to ${count} account${count === 1 ? "" : "s"}`;
 
   return (
-    <div className="grid gap-8 xl:grid-cols-[minmax(0,6fr)_minmax(0,5fr)]">
+    <div className="grid grid-cols-1 gap-8 xl:grid-cols-[minmax(0,6fr)_minmax(0,5fr)]">
       <section aria-label="Write the post">
         <h1 className="heading text-4xl">{initial ? "Edit post" : "Compose"}</h1>
         <div className="mt-6">
           <p className="label">Post to</p>
+          {groups.length ? (
+            <div className="mb-3 flex flex-wrap items-center gap-1.5" role="group" aria-label="Groups">
+              <span className="note mr-1">Groups</span>
+              {groups.map((group) => {
+                const members = membersOf(group);
+                return (
+                  <button
+                    key={group.id}
+                    type="button"
+                    className="tag"
+                    aria-pressed={isPicked(group)}
+                    disabled={members.length === 0}
+                    title={members.length === 0 ? "This group has no accounts left." : `Select exactly ${members.length === 1 ? "its 1 account" : `its ${members.length} accounts`}`}
+                    onClick={() => setSelected(members)}
+                  >
+                    <span className="max-w-44 truncate">{group.name}</span>
+                    <span className="num opacity-70">{members.length}</span>
+                  </button>
+                );
+              })}
+            </div>
+          ) : null}
           <div className="flex flex-wrap gap-2">
             {accounts.map((a) => (
               <button key={a.id} type="button" className="chip" aria-pressed={selected.includes(a.id)} onClick={() => toggle(a.id)}>
@@ -233,6 +302,48 @@ export function Composer({ accounts, initial }: { accounts: ComposerAccount[]; i
             Post
           </label>
           <textarea id="post-text" className="field min-h-52 resize-y text-[17px] leading-snug" value={text} onChange={(e) => setText(e.target.value)} placeholder="What do you want to say everywhere?" autoFocus />
+          <div className="mt-2">
+            <button type="button" className="btn btn-quiet btn-sm" aria-expanded={signing} aria-controls="post-signatures" onClick={() => setSigning((on) => !on)}>
+              <Icon name="plus" size={16} /> Add signature
+            </button>
+            {signing ? (
+              <div id="post-signatures" className="panel mt-2 p-2">
+                {signatures.length === 0 ? (
+                  <p className="note p-2">
+                    No signatures saved yet. A signature is a sign-off or a set of hashtags you keep for the end of a post.{" "}
+                    <Link className="link" href="/app/accounts#signatures">
+                      Create one under Accounts
+                    </Link>
+                  </p>
+                ) : (
+                  <ul>
+                    {signatures.map((signature) => {
+                      const offering = chosen.filter((a) => a.signature_id === signature.id);
+                      return (
+                        <li key={signature.id}>
+                          <button type="button" className="row block w-full rounded-md p-2 text-left" onClick={() => sign(signature)}>
+                            <span className="flex flex-wrap items-baseline gap-x-2">
+                              <span className="font-medium">{signature.name}</span>
+                              {offering.length ? <span className="note">{`Default for ${offering.map((a) => a.handle).join(", ")}`}</span> : null}
+                            </span>
+                            <span className="note line-clamp-2 break-words whitespace-pre-wrap">{signature.content}</span>
+                          </button>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
+                {signatures.length ? (
+                  <p className="note px-2 pt-1 pb-1">
+                    It goes at the end of the post as text you can edit, and counts toward every limit.{" "}
+                    <Link className="link" href="/app/accounts#signatures">
+                      Manage signatures
+                    </Link>
+                  </p>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
         </div>
 
         <div className="mt-4">
@@ -265,6 +376,10 @@ export function Composer({ accounts, initial }: { accounts: ComposerAccount[]; i
             <button type="button" className="btn btn-quiet h-24 w-32 flex-col gap-1 text-sm" onClick={() => file.current?.click()} disabled={uploading}>
               {uploading ? <span className="spinner" /> : <Icon name="image" size={20} />}
               {uploading ? "Uploading" : "Add media"}
+            </button>
+            <button type="button" className="btn btn-quiet h-24 w-32 flex-col gap-1 text-sm whitespace-normal" onClick={() => setLibrary(true)}>
+              <Icon name="library" size={20} />
+              Choose from library
             </button>
             <input ref={file} type="file" hidden multiple accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,video/quicktime,video/webm" onChange={(e) => upload(e.target.files)} />
           </div>
@@ -304,6 +419,10 @@ export function Composer({ accounts, initial }: { accounts: ComposerAccount[]; i
             <Icon name="plus" size={16} /> Add to thread
           </button>
           {thread.length === 0 ? <span className="note ml-3">Add a first comment or a full thread.</span> : null}
+        </div>
+
+        <div className="mt-8">
+          <TagPicker value={tags} onChange={setTags} draft={tagDraft} onDraft={setTagDraft} known={knownTags} onProblem={show} />
         </div>
 
         <div className="mt-8 flex flex-wrap items-end gap-4">
@@ -362,6 +481,8 @@ export function Composer({ accounts, initial }: { accounts: ComposerAccount[]; i
             const copy = own ?? text;
             const length = measure(copy, a.limits.count);
             const found = issues[a.id];
+            // An account's default signature is offered here and added only when asked.
+            const offered = signatureOf(a);
             return (
               <article key={`${a.id}-${found.length ? shake : 0}`} className={`sheet ${found.length && shake ? "is-shaking" : ""}`} data-over={found.length > 0}>
                 <header className="flex items-center justify-between gap-3">
@@ -401,6 +522,14 @@ export function Composer({ accounts, initial }: { accounts: ComposerAccount[]; i
                     {problem}
                   </p>
                 ))}
+                {offered && !endsWithSignature(copy, offered.content) ? (
+                  <p className="note mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 pt-3" style={{ borderTop: "1px solid var(--line)" }}>
+                    <span className="min-w-0 break-words">{`This account offers the signature ${offered.name}.`}</span>
+                    <button type="button" className="btn btn-quiet btn-sm" onClick={() => signFor(a, offered)}>
+                      Add it to this account
+                    </button>
+                  </p>
+                ) : null}
                 <button
                   type="button"
                   className="btn btn-bare btn-sm mt-2 -ml-2.5"
@@ -418,6 +547,12 @@ export function Composer({ accounts, initial }: { accounts: ComposerAccount[]; i
           })}
         </div>
       </section>
+      <MediaPicker
+        open={library}
+        onClose={() => setLibrary(false)}
+        attached={media.map((m) => m.id)}
+        onToggle={(item) => setMedia((all) => (all.some((m) => m.id === item.id) ? all.filter((m) => m.id !== item.id) : [...all, { id: item.id, type: item.type, url: item.url, public_url: item.public_url, filename: item.filename, alt: item.alt }]))}
+      />
       {toast}
     </div>
   );

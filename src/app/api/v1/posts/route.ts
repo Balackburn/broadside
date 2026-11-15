@@ -7,6 +7,7 @@ export const GET = route((request) => {
     status: (q.get("status") as PostStatus | null) ?? undefined,
     from: q.get("from") ?? undefined,
     to: q.get("to") ?? undefined,
+    tag: q.get("tag") ?? undefined,
     limit: q.get("limit") ? Number(q.get("limit")) : undefined,
   });
 });

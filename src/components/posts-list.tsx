@@ -3,6 +3,8 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { tagKey } from "@/lib/tag-rules";
+import { TagFilter, TagList, TagManager, type TagInfo } from "./tags";
 import { api, Icon, Stamp, Status, Tabs, Time, useToast } from "./ui";
 
 type Part = { part: number; status: string; url: string | null };
@@ -19,6 +21,7 @@ type Post = {
   series: { id: string; active: boolean } | null;
   targets: Target[];
   media: { id: string }[];
+  tags: string[];
 };
 type Filter = "all" | "scheduled" | "published" | "failed" | "draft";
 
@@ -35,13 +38,17 @@ const ORIGIN: Record<string, string> = { ui: "From the app", mcp: "From an agent
 const matches = (post: Post, filter: Filter) =>
   filter === "all" || (filter === "failed" ? post.status === "failed" || post.status === "partial" : filter === "scheduled" ? post.status === "scheduled" || post.status === "publishing" : post.status === filter);
 
-export function PostsList({ posts, focus }: { posts: Post[]; focus?: string }) {
+export function PostsList({ posts, tags, focus }: { posts: Post[]; tags: TagInfo[]; focus?: string }) {
   const router = useRouter();
   const { show, toast } = useToast();
   const [filter, setFilter] = useState<Filter>("all");
   const [open, setOpen] = useState<string | null>(focus ?? null);
   const [busy, setBusy] = useState<string | null>(null);
-  const shown = posts.filter((p) => matches(p, filter));
+  const [tag, setTag] = useState<string | null>(null);
+  const [managing, setManaging] = useState(false);
+  // A tag that was renamed or deleted while it was the filter no longer exists, so the filter falls back to every tag.
+  const filterTag = tag !== null && tags.some((t) => tagKey(t.name) === tagKey(tag)) ? tag : null;
+  const shown = posts.filter((p) => matches(p, filter) && (filterTag === null || p.tags.some((name) => tagKey(name) === tagKey(filterTag))));
 
   async function act(key: string, path: string, method: string, done: string, body?: unknown) {
     setBusy(key);
@@ -64,6 +71,15 @@ export function PostsList({ posts, focus }: { posts: Post[]; focus?: string }) {
           <Tabs label="Filter posts" value={filter} onChange={setFilter} options={FILTERS} />
         </div>
       </div>
+
+      {tags.length ? (
+        <div className="mt-4 flex flex-wrap items-start justify-between gap-x-4 gap-y-2">
+          <TagFilter tags={tags.map((t) => t.name)} value={filterTag} onChange={setTag} />
+          <button type="button" className="btn btn-bare btn-sm -mr-3 ml-auto min-h-7" onClick={() => setManaging(true)}>
+            Manage tags
+          </button>
+        </div>
+      ) : null}
 
       {shown.length === 0 ? (
         <div className="panel mt-8 p-10 text-center">
@@ -94,6 +110,7 @@ export function PostsList({ posts, focus }: { posts: Post[]; focus?: string }) {
                       {post.media.length ? <span>{post.media.length} media</span> : null}
                       {post.thread.length ? <span>{`Thread of ${post.thread.length + 1}`}</span> : null}
                       {post.repeat ? <span>{`Repeats every ${post.repeat.every}`}</span> : null}
+                      <TagList tags={post.tags} />
                     </span>
                   </span>
                   <span className="hidden flex-none items-center sm:flex" aria-hidden="true">
@@ -241,6 +258,7 @@ export function PostsList({ posts, focus }: { posts: Post[]; focus?: string }) {
           })}
         </ul>
       )}
+      <TagManager open={managing} onClose={() => setManaging(false)} tags={tags} />
       {toast}
     </div>
   );

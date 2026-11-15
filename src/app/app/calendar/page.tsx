@@ -12,6 +12,7 @@ export default function CalendarPage() {
     status: p.status,
     at: p.publish_at ?? p.created_at,
     platforms: p.targets.map((t) => t.platform),
+    tags: p.tags,
   }));
   return <Calendar posts={posts} />;
 }

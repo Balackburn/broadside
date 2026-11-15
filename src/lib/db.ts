@@ -103,7 +103,48 @@ const ADDED: [table: string, column: string, definition: string][] = [
   ["posts", "repeat_anchor", "TEXT"],
   ["posts", "repeat_count", "INTEGER NOT NULL DEFAULT 0"],
   ["posts", "repeat_spawned", "INTEGER NOT NULL DEFAULT 0"],
+  // Signatures: the one an account offers by default in the composer.
+  ["accounts", "signature_id", "TEXT"],
 ];
+
+/**
+ * Tables added after the first release: tags and the posts that carry them,
+ * named groups of accounts, and saved signatures. Each is created only if it
+ * is missing, so an existing database gains them and keeps every row it had.
+ * `name_key` is the name folded to one case, so "Launch" and "launch" are one tag.
+ */
+const ADDED_TABLES = `
+CREATE TABLE IF NOT EXISTS tags (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  name_key TEXT NOT NULL UNIQUE,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS post_tags (
+  post_id TEXT NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+  tag_id TEXT NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+  PRIMARY KEY (post_id, tag_id)
+);
+CREATE INDEX IF NOT EXISTS post_tags_tag ON post_tags(tag_id);
+CREATE TABLE IF NOT EXISTS account_groups (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  name_key TEXT NOT NULL UNIQUE,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS group_members (
+  group_id TEXT NOT NULL REFERENCES account_groups(id) ON DELETE CASCADE,
+  account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  PRIMARY KEY (group_id, account_id)
+);
+CREATE TABLE IF NOT EXISTS signatures (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  content TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+`;
 
 export function migrate(handle: DatabaseSync): void {
   // One writer at a time: a second process starting at the same moment waits here, then finds the columns present.
@@ -119,6 +160,7 @@ export function migrate(handle: DatabaseSync): void {
       }
     }
     handle.exec("CREATE INDEX IF NOT EXISTS posts_series ON posts(series_id)");
+    handle.exec(ADDED_TABLES);
     handle.exec("COMMIT");
   } catch (error) {
     handle.exec("ROLLBACK");

@@ -4,9 +4,11 @@ import { useRouter } from "next/navigation";
 import { useState } from "react";
 import type { CredentialField, Limits } from "@/lib/platforms/types";
 import { redirectAddress } from "@/lib/redirect";
+import { GroupsPanel, type GroupInfo } from "./groups-panel";
+import { SignaturesPanel, type SignatureInfo } from "./signatures-panel";
 import { api, Check, CopyButton, Dialog, Icon, Stamp, Time, useHydrated, useToast } from "./ui";
 
-type Account = { id: string; platform: string; label: string; handle: string; status: string; last_error: string | null; created_at: string };
+type Account = { id: string; platform: string; label: string; handle: string; status: string; last_error: string | null; signature_id: string | null; created_at: string };
 type SignIn = { callback_path: string; scopes: string[]; loopback: "localhost" | "127.0.0.1" | null; https_only: boolean; paste: CredentialField[]; paste_help: string | null };
 type Platform = { id: string; name: string; docs_url: string; setup: string[]; fields: CredentialField[]; limits: Limits; oauth: SignIn | null };
 /** What a sign-in left to choose from: Pages, Instagram accounts or boards. */
@@ -14,7 +16,25 @@ type Choice = { id: string; platform: string; name: string; prompt: string; mult
 
 const LOOPBACK = ["localhost", "127.0.0.1"];
 
-export function AccountsPanel({ accounts, platforms, open, publicUrl, notice, choice }: { accounts: Account[]; platforms: Platform[]; open?: string; publicUrl: string | null; notice?: { ok: boolean; text: string }; choice?: Choice }) {
+export function AccountsPanel({
+  accounts,
+  platforms,
+  groups,
+  signatures,
+  open,
+  publicUrl,
+  notice,
+  choice,
+}: {
+  accounts: Account[];
+  platforms: Platform[];
+  groups: GroupInfo[];
+  signatures: SignatureInfo[];
+  open?: string;
+  publicUrl: string | null;
+  notice?: { ok: boolean; text: string };
+  choice?: Choice;
+}) {
   const router = useRouter();
   const hydrated = useHydrated();
   const { show, toast } = useToast();
@@ -82,6 +102,8 @@ export function AccountsPanel({ accounts, platforms, open, publicUrl, notice, ch
     }
   }
 
+  const signatureNames: Record<string, string> = Object.fromEntries(signatures.map((s) => [s.id, s.name]));
+
   const toggle = (id: string) => setPicked((now) => (choosing?.multiple ? (now.includes(id) ? now.filter((p) => p !== id) : [...now, id]) : [id]));
 
   const leaveChoice = () => {
@@ -138,7 +160,7 @@ export function AccountsPanel({ accounts, platforms, open, publicUrl, notice, ch
             <p className="note mt-2 max-w-lg">Pick a network below. You create the credentials yourself, and Broadside encrypts them on this machine.</p>
           </div>
         ) : (
-          <ul className="grid gap-2 md:grid-cols-2">
+          <ul className="grid grid-cols-1 gap-2 md:grid-cols-2">
             {accounts.map((account) => (
               <li key={account.id} className="panel flex items-center gap-3 p-4">
                 <Stamp platform={account.platform} large />
@@ -147,6 +169,7 @@ export function AccountsPanel({ accounts, platforms, open, publicUrl, notice, ch
                   <span className="note block truncate">
                     {account.label}, connected <Time iso={account.created_at} />
                   </span>
+                  {signatureNames[account.signature_id ?? ""] ? <span className="note block truncate">{`Offers the signature ${signatureNames[account.signature_id ?? ""]}`}</span> : null}
                   {account.status === "needs_attention" ? <span className="mt-1 block text-sm text-bad">{account.last_error ?? "This account needs reconnecting."}</span> : null}
                 </span>
                 <button type="button" className="btn btn-bare btn-sm" onClick={() => disconnect(account)}>
@@ -157,6 +180,9 @@ export function AccountsPanel({ accounts, platforms, open, publicUrl, notice, ch
           </ul>
         )}
       </section>
+
+      {/* A group is made of connected accounts, so the section appears once there is one to put in it. */}
+      {accounts.length ? <GroupsPanel accounts={accounts} groups={groups} show={show} /> : null}
 
       <section className="mt-12" aria-label="Add an account">
         <h2 className="title text-2xl">Add an account</h2>
@@ -171,6 +197,8 @@ export function AccountsPanel({ accounts, platforms, open, publicUrl, notice, ch
           ))}
         </ul>
       </section>
+
+      <SignaturesPanel accounts={accounts} signatures={signatures} show={show} />
 
       <Dialog open={connecting !== null} onClose={() => setConnecting(null)} title={connecting ? `Connect ${connecting.name}` : "Connect"}>
         {connecting ? (

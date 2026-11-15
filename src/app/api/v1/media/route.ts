@@ -1,8 +1,12 @@
 import { InputError } from "@/lib/accounts";
 import { body, route } from "@/lib/http";
-import { importMedia, listMedia, maxUploadBytes, saveMedia } from "@/lib/media";
+import { importMedia, listLibrary, maxUploadBytes, saveMedia } from "@/lib/media";
 
-export const GET = route(() => listMedia());
+/** The library, newest first, each file with the posts that use it. `?limit=` caps the list (default 200). */
+export const GET = route((request) => {
+  const limit = new URL(request.url).searchParams.get("limit");
+  return listLibrary(limit ? Number(limit) : undefined);
+});
 
 /** Accepts a multipart upload (field "file", optional "alt") or JSON { url, alt }. */
 export const POST = route(async (request) => {

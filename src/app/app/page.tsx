@@ -1,8 +1,11 @@
 import type { Metadata } from "next";
 import { Composer, type ComposerInitial } from "@/components/composer";
 import { listAccounts } from "@/lib/accounts";
+import { listGroups } from "@/lib/groups";
 import { connector, fits } from "@/lib/platforms";
 import { getPost } from "@/lib/posts";
+import { listSignatures } from "@/lib/signatures";
+import { listTags } from "@/lib/tags";
 
 export const dynamic = "force-dynamic";
 export const metadata: Metadata = { title: "Compose" };
@@ -12,7 +15,7 @@ export default async function ComposePage({ searchParams }: PageProps<"/app">) {
   const { edit } = await searchParams;
   const accounts = listAccounts().flatMap((account) => {
     const c = connector(account.platform);
-    return c ? [{ id: account.id, platform: account.platform, handle: account.handle, ...fits(c) }] : [];
+    return c ? [{ id: account.id, platform: account.platform, handle: account.handle, signature_id: account.signature_id, ...fits(c) }] : [];
   });
   const post = typeof edit === "string" ? getPost(edit) : undefined;
   const initial: ComposerInitial | undefined =
@@ -25,8 +28,18 @@ export default async function ComposePage({ searchParams }: PageProps<"/app">) {
           targets: post.targets.map((t) => ({ account_id: t.account_id, content_override: t.content_override })),
           media: post.media.map((m) => ({ id: m.id, type: m.type, url: m.url, public_url: m.public_url, filename: m.filename, alt: m.alt })),
           thread: post.thread,
+          tags: post.tags,
           repeat: post.repeat && { every: post.repeat.every, until: post.repeat.until },
         }
       : undefined;
-  return <Composer key={initial?.id ?? "new"} accounts={accounts} initial={initial} />;
+  return (
+    <Composer
+      key={initial?.id ?? "new"}
+      accounts={accounts}
+      initial={initial}
+      groups={listGroups().map((g) => ({ id: g.id, name: g.name, account_ids: g.account_ids }))}
+      signatures={listSignatures().map((s) => ({ id: s.id, name: s.name, content: s.content }))}
+      knownTags={listTags().map((t) => t.name)}
+    />
+  );
 }

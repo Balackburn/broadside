@@ -1,11 +1,13 @@
 import { credentialsOf, getAccount, InputError, markAccount, saveCredentials } from "./accounts";
 import { newId } from "./crypto";
 import { all, db, get, now, run } from "./db";
+import { groupTargets } from "./groups";
 import { getMedia, toItem, type Media } from "./media";
 import { guardedFetch } from "./net";
 import { connector, fits, measure, problems, threadProblems } from "./platforms";
 import { PublishError, type PartRef } from "./platforms/types";
 import { EVERY, isTimeZone, nextOccurrence, type Every } from "./repeat";
+import { copyPostTags, parseTags, setPostTags, tagKey, tagsOf } from "./tags";
 
 export type TargetStatus = "draft" | "scheduled" | "pending" | "publishing" | "retrying" | "published" | "failed" | "cancelled";
 export type PostStatus = "draft" | "scheduled" | "publishing" | "published" | "partial" | "failed" | "cancelled";
@@ -40,6 +42,8 @@ export type Post = {
   /** The parts that follow the main text, each published as a reply to the one before. */
   thread: string[];
   media: Media[];
+  /** The names of the tags this post carries, in alphabetical order. */
+  tags: string[];
   status: PostStatus;
   publish_at: string | null;
   origin: string;
@@ -56,9 +60,14 @@ export type TargetInput = { account_id: string; content_override?: string | null
 
 export type PostInput = {
   content: string;
-  targets: TargetInput[];
+  /** The accounts to post to. Leave out when `group_id` names them. */
+  targets?: TargetInput[];
+  /** A group of accounts, as another way to name the targets: every account in the group right now. */
+  group_id?: string | null;
   thread?: string[];
   media_ids?: string[];
+  /** Tag names. A tag that does not exist yet is created. */
+  tags?: string[];
   publish_at?: string | null;
   repeat?: RepeatInput | null;
   draft?: boolean;
@@ -138,6 +147,7 @@ function hydrate(row: PostRow): Post {
     content: row.content,
     thread,
     media,
+    tags: tagsOf(row.id),
     // A thread that stopped part of the way is out there: the post is partly published, whatever its targets say.
     status: (status === "failed" || status === "cancelled") && targets.some((t) => t.parts[0].status === "published") ? "partial" : status,
     publish_at: row.publish_at,
@@ -155,11 +165,14 @@ export function getPost(id: string): Post | undefined {
   return row && hydrate(row);
 }
 
-export function listPosts(filter: { status?: PostStatus; limit?: number; from?: string; to?: string } = {}): Post[] {
+export function listPosts(filter: { status?: PostStatus; limit?: number; from?: string; to?: string; tag?: string } = {}): Post[] {
   const rows = all<PostRow>("SELECT * FROM posts ORDER BY COALESCE(publish_at, created_at) DESC LIMIT 500");
+  // A tag is matched by name, whatever its case.
+  const wanted = filter.tag ? tagKey(filter.tag.trim()) : null;
   return rows
     .map(hydrate)
     .filter((p) => !filter.status || p.status === filter.status)
+    .filter((p) => !wanted || p.tags.some((name) => tagKey(name) === wanted))
     .filter((p) => {
       const when = p.publish_at ?? p.created_at;
       return (!filter.from || when >= filter.from) && (!filter.to || when <= filter.to);
@@ -192,6 +205,18 @@ function parseRepeat(value: unknown, publishAt: string | null): Repeat | null {
   const until = input.until ? parseWhen(/^\d{4}-\d{2}-\d{2}$/.test(input.until) ? `${input.until}T23:59:59.999Z` : input.until) : null;
   if (until && until < publishAt) throw new InputError("repeat.until is earlier than the first occurrence.");
   return { every: input.every as Every, until, timezone };
+}
+
+/**
+ * The targets a caller named, either one by one or as a group. A group stands
+ * for the accounts in it at this moment, so one whose account was disconnected
+ * simply names one fewer.
+ */
+function namedTargets(targets: TargetInput[] | undefined, groupId: string | null | undefined): TargetInput[] | undefined {
+  if (groupId === undefined || groupId === null || groupId === "") return targets;
+  if (typeof groupId !== "string") throw new InputError("group_id must be a group's id.");
+  if (targets?.length) throw new InputError("Name the accounts with targets or with group_id, not both.");
+  return groupTargets(groupId);
 }
 
 /** Every reason a post cannot go to a target, found before anything is saved or sent. */
@@ -248,7 +273,8 @@ export async function createPost(input: PostInput, fetcher: typeof fetch = fetch
   const content = input.content ?? "";
   const mediaIds = input.media_ids ?? [];
   const thread = parseThread(input.thread);
-  const resolved = check(content, mediaIds, input.targets ?? [], thread);
+  const tags = parseTags(input.tags);
+  const resolved = check(content, mediaIds, namedTargets(input.targets, input.group_id) ?? [], thread);
   const publishAt = parseWhen(input.publish_at);
   const repeat = parseRepeat(input.repeat, publishAt);
   const later = publishAt !== null && new Date(publishAt).getTime() > Date.now() + 1000;
@@ -276,6 +302,7 @@ export async function createPost(input: PostInput, fetcher: typeof fetch = fetch
       stamp,
     );
     for (const { account, target } of resolved) addTarget(id, account, target, status);
+    setPostTags(id, tags);
     database.exec("COMMIT");
   } catch (error) {
     database.exec("ROLLBACK");
@@ -359,8 +386,8 @@ export async function publishTarget(targetId: string, fetcher: typeof fetch = fe
  * Creates the next occurrence of a repeating post as its own scheduled post.
  * The flag on the parent is flipped in the same transaction as the insert, so
  * however many clocks, targets or processes get here, exactly one of them
- * creates it. The copy carries the text, thread, media and accounts as they
- * are now, so an edit to one occurrence carries forward.
+ * creates it. The copy carries the text, thread, media, tags and accounts as
+ * they are now, so an edit to one occurrence carries forward.
  */
 function lineUpNext(postId: string): void {
   const database = db();
@@ -392,6 +419,7 @@ function lineUpNext(postId: string): void {
         stamp,
       );
       for (const t of targets) addTarget(id, { id: t.account_id, platform: t.platform, handle: t.handle }, { content_override: t.content_override, options: JSON.parse(t.options) }, "scheduled");
+      copyPostTags(postId, id);
     }
     database.exec("COMMIT");
   } catch (error) {
@@ -413,7 +441,7 @@ function editable(post: Post): void {
 
 export async function updatePost(
   id: string,
-  patch: { content?: string; publish_at?: string | null; targets?: TargetInput[]; thread?: string[]; media_ids?: string[]; repeat?: RepeatInput | null; draft?: boolean },
+  patch: { content?: string; publish_at?: string | null; targets?: TargetInput[]; group_id?: string | null; thread?: string[]; media_ids?: string[]; tags?: string[]; repeat?: RepeatInput | null; draft?: boolean },
   fetcher: typeof fetch = fetch,
 ): Promise<Post> {
   const post = getPost(id);
@@ -422,8 +450,10 @@ export async function updatePost(
   const content = patch.content ?? post.content;
   const mediaIds = patch.media_ids ?? post.media.map((m) => m.id);
   const targets: TargetInput[] =
-    patch.targets ?? post.targets.map((t) => ({ account_id: t.account_id, content_override: t.content_override, options: t.options }));
+    namedTargets(patch.targets, patch.group_id) ?? post.targets.map((t) => ({ account_id: t.account_id, content_override: t.content_override, options: t.options }));
   const thread = patch.thread === undefined ? post.thread : parseThread(patch.thread);
+  // Tags left out stay as they are; an empty list removes them all.
+  const tags = patch.tags === undefined ? null : parseTags(patch.tags);
   const resolved = check(content, mediaIds, targets, thread);
   const publishAt = patch.publish_at === undefined ? post.publish_at : parseWhen(patch.publish_at);
   const repeat = patch.repeat === undefined ? post.repeat : parseRepeat(patch.repeat, publishAt);
@@ -454,6 +484,7 @@ export async function updatePost(
     );
     run("DELETE FROM targets WHERE post_id = ?", id);
     for (const { account, target } of resolved) addTarget(id, account, target, status);
+    if (tags) setPostTags(id, tags);
     database.exec("COMMIT");
   } catch (error) {
     database.exec("ROLLBACK");
@@ -543,14 +574,14 @@ export function recoverInterrupted(): number {
 }
 
 /** A dry run: how the text, media and thread fit each chosen account. Sends and saves nothing. */
-export function inspectPost(input: { content?: string; targets?: TargetInput[]; media_ids?: string[]; thread?: string[] }) {
+export function inspectPost(input: { content?: string; targets?: TargetInput[]; group_id?: string | null; media_ids?: string[]; thread?: string[] }) {
   const media = (input.media_ids ?? []).map((id) => {
     const found = getMedia(id);
     if (!found) throw new InputError(`No media with id ${id}.`);
     return { type: found.type, hasPublicUrl: Boolean(found.public_url) };
   });
   const thread = parseThread(input.thread);
-  return (input.targets ?? []).map((target) => {
+  return (namedTargets(input.targets, input.group_id) ?? []).map((target) => {
     const account = getAccount(target.account_id);
     const c = account && connector(account.platform);
     if (!account || !c) return { account_id: target.account_id, ok: false, problems: ["No connected account has this id."] };

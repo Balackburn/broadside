@@ -1,9 +1,11 @@
 import type { Metadata } from "next";
 import { AccountsPanel } from "@/components/accounts-panel";
 import { listAccounts } from "@/lib/accounts";
+import { listGroups } from "@/lib/groups";
 import { publicBase } from "@/lib/media";
 import { pendingChoice } from "@/lib/oauth";
 import { connectors, describe } from "@/lib/platforms";
+import { listSignatures } from "@/lib/signatures";
 
 export const dynamic = "force-dynamic";
 export const metadata: Metadata = { title: "Accounts" };
@@ -24,6 +26,8 @@ export default async function AccountsPage({ searchParams }: PageProps<"/app/acc
     <AccountsPanel
       accounts={listAccounts()}
       platforms={connectors.map(describe)}
+      groups={listGroups()}
+      signatures={listSignatures()}
       open={typeof connect === "string" ? connect : undefined}
       publicUrl={publicBase() || null}
       notice={notice}
