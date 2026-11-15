@@ -8,7 +8,7 @@ type Account = { id: string; platform: string; handle: string };
 export type SignatureInfo = { id: string; name: string; content: string; default_for: string[] };
 
 /** Saved pieces of text for the end of a post. The composer adds one when asked, as text you can then edit. */
-export function SignaturesPanel({ accounts, signatures, show }: { accounts: Account[]; signatures: SignatureInfo[]; show: (message: string) => void }) {
+export function SignaturesPanel({ accounts, signatures, show, canWrite = true }: { accounts: Account[]; signatures: SignatureInfo[]; show: (message: string) => void; canWrite?: boolean }) {
   const router = useRouter();
   const [editing, setEditing] = useState<SignatureInfo | "new" | null>(null);
   const [name, setName] = useState("");
@@ -63,7 +63,7 @@ export function SignaturesPanel({ accounts, signatures, show }: { accounts: Acco
     <section className="mt-12 scroll-mt-8" id="signatures" aria-label="Signatures">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h2 className="title text-2xl">Signatures</h2>
-        {signatures.length ? (
+        {signatures.length && canWrite ? (
           <button type="button" className="btn btn-quiet btn-sm" onClick={() => start("new")}>
             <Icon name="plus" size={16} /> New signature
           </button>
@@ -74,9 +74,11 @@ export function SignaturesPanel({ accounts, signatures, show }: { accounts: Acco
         <div className="panel mt-4 p-6">
           <p className="title text-lg">No signatures yet.</p>
           <p className="note mt-2 max-w-xl">A signature is saved text for the end of a post: a sign-off or a set of hashtags. Add signature in the composer puts it into the post, where you can edit it and it counts toward each network&rsquo;s limit.</p>
-          <button type="button" className="btn btn-sm mt-4" onClick={() => start("new")}>
-            <Icon name="plus" size={16} /> New signature
-          </button>
+          {canWrite ? (
+            <button type="button" className="btn btn-sm mt-4" onClick={() => start("new")}>
+              <Icon name="plus" size={16} /> New signature
+            </button>
+          ) : null}
         </div>
       ) : (
         <ul className="mt-4 grid grid-cols-1 gap-2 md:grid-cols-2">
@@ -86,14 +88,16 @@ export function SignaturesPanel({ accounts, signatures, show }: { accounts: Acco
               <li key={signature.id} className="panel flex flex-col gap-2 p-4">
                 <div className="flex items-center gap-3">
                   <span className="min-w-0 flex-1 truncate font-medium">{signature.name}</span>
-                  <span className="flex flex-none items-center">
-                    <button type="button" className="btn btn-bare btn-sm" onClick={() => start(signature)} aria-label={`Edit the signature ${signature.name}`}>
-                      Edit
-                    </button>
-                    <button type="button" className="btn btn-bare btn-sm" onClick={() => remove(signature)} aria-label={`Delete the signature ${signature.name}`}>
-                      Delete
-                    </button>
-                  </span>
+                  {canWrite ? (
+                    <span className="flex flex-none items-center">
+                      <button type="button" className="btn btn-bare btn-sm" onClick={() => start(signature)} aria-label={`Edit the signature ${signature.name}`}>
+                        Edit
+                      </button>
+                      <button type="button" className="btn btn-bare btn-sm" onClick={() => remove(signature)} aria-label={`Delete the signature ${signature.name}`}>
+                        Delete
+                      </button>
+                    </span>
+                  ) : null}
                 </div>
                 <p className="line-clamp-3 text-[15px] leading-snug break-words whitespace-pre-wrap text-ink-2">{signature.content}</p>
                 {handles.length ? <p className="note truncate">{`Offered by default for ${handles.join(", ")}`}</p> : null}

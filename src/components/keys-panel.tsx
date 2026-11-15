@@ -2,9 +2,10 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { manages, rank, ROLES, type Role } from "@/lib/roles";
 import { api, CopyButton, Tabs, Time, useToast } from "./ui";
 
-type Key = { id: string; name: string; prefix: string; created_at: string; last_used_at: string | null };
+type Key = { id: string; name: string; prefix: string; created_at: string; last_used_at: string | null; member_id?: string | null; role?: Role | null; owner?: string | null; owner_role?: Role | null };
 type Client = "claude-code" | "json" | "stdio" | "curl";
 
 const TOOLS: [string, string][] = [
@@ -28,13 +29,18 @@ const TOOLS: [string, string][] = [
   ["list_outgoing_webhooks", "The outgoing webhooks, to look at only"],
 ];
 
-export function KeysPanel({ keys, base, cwd }: { keys: Key[]; base: string; cwd: string }) {
+/** `team` is the member looking, when the install has a team: a new key is then theirs, with a role they choose up to their own. */
+export function KeysPanel({ keys, base, cwd, team }: { keys: Key[]; base: string; cwd: string; team?: { id: string; role: Role } }) {
   const router = useRouter();
   const { show, toast } = useToast();
   const [name, setName] = useState("");
   const [fresh, setFresh] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [client, setClient] = useState<Client>("claude-code");
+  const [role, setRole] = useState<Role>("editor");
+  const offered = team ? ROLES.filter((r) => rank(r) <= rank(team.role)) : [];
+  // An admin revokes their own keys, keys from before the team, and those of editors and viewers. The server holds the same line.
+  const canRevoke = (key: Key) => !team || !key.member_id || key.member_id === team.id || !key.owner_role || manages(team.role, key.owner_role);
   const token = fresh ?? "bs_your_key";
 
   const snippets: Record<Client, string> = {
@@ -46,7 +52,9 @@ export function KeysPanel({ keys, base, cwd }: { keys: Key[]; base: string; cwd:
   const hints: Record<Client, string> = {
     "claude-code": "Run this in a terminal. Claude Code then has Broadside's tools in every session.",
     json: "For Claude Desktop, Cursor and other clients that read an mcpServers file.",
-    stdio: "Runs on this machine without a key, and can read media straight from your disk.",
+    stdio: team
+      ? "Runs on this machine and can read media straight from your disk. With a team it works as an editor that belongs to no one, unless BROADSIDE_API_KEY in its env holds a member's key."
+      : "Runs on this machine without a key, and can read media straight from your disk.",
     curl: "The same engine over plain HTTP, for scripts and automations.",
   };
 
@@ -54,7 +62,7 @@ export function KeysPanel({ keys, base, cwd }: { keys: Key[]; base: string; cwd:
     event.preventDefault();
     setBusy(true);
     try {
-      const made = await api<{ token: string }>("/keys", { method: "POST", body: JSON.stringify({ name }) });
+      const made = await api<{ token: string }>("/keys", { method: "POST", body: JSON.stringify(team ? { name, role } : { name }) });
       setFresh(made.token);
       setName("");
       router.refresh();
@@ -84,15 +92,30 @@ export function KeysPanel({ keys, base, cwd }: { keys: Key[]; base: string; cwd:
       <div className="mt-8 grid gap-10 xl:grid-cols-[minmax(0,5fr)_minmax(0,6fr)]">
         <section aria-label="API keys">
           <h2 className="title text-2xl">Keys</h2>
-          <form onSubmit={create} className="mt-4 flex gap-2">
+          <form onSubmit={create} className={team ? "mt-4 flex flex-wrap gap-2" : "mt-4 flex gap-2"}>
             <label className="sr-only" htmlFor="key-name">
               Key name
             </label>
-            <input id="key-name" className="field" placeholder="Name it, for example Claude Code" value={name} onChange={(e) => setName(e.target.value)} />
+            <input id="key-name" className={team ? "field min-w-48 flex-1" : "field"} placeholder="Name it, for example Claude Code" value={name} onChange={(e) => setName(e.target.value)} />
+            {team ? (
+              <>
+                <label className="sr-only" htmlFor="key-role">
+                  Role for the key
+                </label>
+                <select id="key-role" className="field w-auto flex-none" value={role} onChange={(e) => setRole(e.target.value as Role)}>
+                  {offered.map((r) => (
+                    <option key={r} value={r}>
+                      {r}
+                    </option>
+                  ))}
+                </select>
+              </>
+            ) : null}
             <button type="submit" className="btn flex-none" disabled={busy}>
               Create key
             </button>
           </form>
+          {team ? <p className="note mt-2">A key is yours and can do what its role allows, never more than you can. If your role is lowered or you are disabled, so is the key.</p> : null}
 
           {fresh ? (
             <div className="sheet mt-4" style={{ boxShadow: "inset 0 0 0 2px var(--signal)" }}>
@@ -113,6 +136,11 @@ export function KeysPanel({ keys, base, cwd }: { keys: Key[]; base: string; cwd:
                 <li key={key.id} className="panel flex items-center gap-3 p-4">
                   <span className="min-w-0 flex-1">
                     <span className="block truncate font-medium">{key.name}</span>
+                    {team ? (
+                      <span className="note block truncate">
+                        {key.member_id ? `${key.owner ?? "A removed member"}, ${key.role ?? "viewer"}` : "Created before the team. Works as an editor and belongs to no one."}
+                      </span>
+                    ) : null}
                     <span className="note num block truncate">
                       <code className="font-mono text-[13px]">{key.prefix}…</code> {key.last_used_at ? (
                         <>
@@ -123,9 +151,11 @@ export function KeysPanel({ keys, base, cwd }: { keys: Key[]; base: string; cwd:
                       )}
                     </span>
                   </span>
-                  <button type="button" className="btn btn-bare btn-sm" onClick={() => revoke(key)}>
-                    Revoke
-                  </button>
+                  {canRevoke(key) ? (
+                    <button type="button" className="btn btn-bare btn-sm" onClick={() => revoke(key)}>
+                      Revoke
+                    </button>
+                  ) : null}
                 </li>
               ))}
             </ul>

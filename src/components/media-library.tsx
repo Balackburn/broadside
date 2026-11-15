@@ -50,8 +50,8 @@ function Picture({ item }: { item: Pick<LibraryItem, "type" | "url" | "alt"> }) 
   );
 }
 
-/** Everything uploaded or imported, newest first: add to it, describe a file, see where it is used, delete what is finished with. */
-export function MediaLibrary({ items }: { items: LibraryItem[] }) {
+/** Everything uploaded or imported, newest first: add to it, describe a file, see where it is used, delete what is finished with. A viewer (`canWrite` false) sees the library and none of its controls. */
+export function MediaLibrary({ items, canWrite = true }: { items: LibraryItem[]; canWrite?: boolean }) {
   const router = useRouter();
   const { show, toast } = useToast();
   const file = useRef<HTMLInputElement>(null);
@@ -160,17 +160,21 @@ export function MediaLibrary({ items }: { items: LibraryItem[] }) {
         <div className="panel mt-8 p-8 sm:p-10">
           <p className="title text-xl">No media yet.</p>
           <p className="note mt-2 max-w-xl">Every image and video you upload or import by link is kept here. Attach one to as many posts as you like without uploading it again.</p>
-          <div className="mt-6 flex flex-wrap items-center gap-3">
-            {uploadButton("btn")}
-            {importForm}
-          </div>
+          {canWrite ? (
+            <div className="mt-6 flex flex-wrap items-center gap-3">
+              {uploadButton("btn")}
+              {importForm}
+            </div>
+          ) : null}
         </div>
       ) : (
         <>
-          <div className="mt-6 flex flex-wrap items-center gap-3">
-            {uploadButton("btn")}
-            {importForm}
-          </div>
+          {canWrite ? (
+            <div className="mt-6 flex flex-wrap items-center gap-3">
+              {uploadButton("btn")}
+              {importForm}
+            </div>
+          ) : null}
           <ul className="mt-6 grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-4" aria-label="Media library">
             {items.map((item) => {
               const waiting = item.used_by.filter((use) => use.waiting).length;
@@ -211,22 +215,26 @@ export function MediaLibrary({ items }: { items: LibraryItem[] }) {
                     )}
                   </div>
                   {/* The description and Delete sit at the foot of every card, whatever is above them. */}
-                  <div className="mt-auto pt-3">
-                    <label className="sr-only" htmlFor={`alt-${item.id}`}>
-                      {`Description of ${item.filename} for screen readers`}
-                    </label>
-                    <input id={`alt-${item.id}`} key={item.alt ?? ""} className="field min-h-9 px-2.5 py-1 text-sm" placeholder="Describe it" defaultValue={item.alt ?? ""} onBlur={(e) => void saveAlt(item, e.target.value)} />
-                    {refused?.id === item.id ? (
-                      <p className="mt-2 text-[13px] font-medium text-bad" role="alert">
-                        {refused.text}
-                      </p>
-                    ) : null}
-                    <div className="flex justify-end pt-2">
-                      <button type="button" className="btn btn-bare btn-sm" disabled={busy === item.id} onClick={() => remove(item)} aria-label={`Delete ${item.filename}`}>
-                        Delete
-                      </button>
+                  {canWrite ? (
+                    <div className="mt-auto pt-3">
+                      <label className="sr-only" htmlFor={`alt-${item.id}`}>
+                        {`Description of ${item.filename} for screen readers`}
+                      </label>
+                      <input id={`alt-${item.id}`} key={item.alt ?? ""} className="field min-h-9 px-2.5 py-1 text-sm" placeholder="Describe it" defaultValue={item.alt ?? ""} onBlur={(e) => void saveAlt(item, e.target.value)} />
+                      {refused?.id === item.id ? (
+                        <p className="mt-2 text-[13px] font-medium text-bad" role="alert">
+                          {refused.text}
+                        </p>
+                      ) : null}
+                      <div className="flex justify-end pt-2">
+                        <button type="button" className="btn btn-bare btn-sm" disabled={busy === item.id} onClick={() => remove(item)} aria-label={`Delete ${item.filename}`}>
+                          Delete
+                        </button>
+                      </div>
                     </div>
-                  </div>
+                  ) : item.alt ? (
+                    <p className="note mt-auto pt-3 text-[13px]">{item.alt}</p>
+                  ) : null}
                 </li>
               );
             })}

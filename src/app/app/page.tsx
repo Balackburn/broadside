@@ -1,11 +1,14 @@
 import type { Metadata } from "next";
 import { Composer, type ComposerInitial } from "@/components/composer";
+import { RoleNotice } from "@/components/role-notice";
 import { listAccounts } from "@/lib/accounts";
 import { listGroups } from "@/lib/groups";
 import { connector, fits } from "@/lib/platforms";
 import { getPost } from "@/lib/posts";
+import { atLeast } from "@/lib/roles";
 import { listSignatures } from "@/lib/signatures";
 import { listTags } from "@/lib/tags";
+import { viewer } from "@/lib/viewer";
 
 export const dynamic = "force-dynamic";
 export const metadata: Metadata = { title: "Compose" };
@@ -13,6 +16,10 @@ export const metadata: Metadata = { title: "Compose" };
 /** With ?edit=<post id>, the composer opens that draft or scheduled post; anything already sent cannot be edited. */
 export default async function ComposePage({ searchParams }: PageProps<"/app">) {
   const { edit } = await searchParams;
+  const me = await viewer();
+  if (!atLeast(me.role, "editor")) {
+    return <RoleNotice title="Compose">You have the viewer role, which reads posts and does not write them. To write, schedule or publish, ask an admin of this Broadside to make you an editor.</RoleNotice>;
+  }
   const accounts = listAccounts().flatMap((account) => {
     const c = connector(account.platform);
     return c ? [{ id: account.id, platform: account.platform, handle: account.handle, signature_id: account.signature_id, ...fits(c) }] : [];

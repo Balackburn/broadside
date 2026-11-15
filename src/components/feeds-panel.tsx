@@ -27,7 +27,7 @@ const nameOf = (feed: Feed): string => feed.title || host(feed.url);
  * names: a draft to read first, or published at once if the operator chose
  * that. Everything a feed says is another site's text, set here as plain text.
  */
-export function FeedsPanel({ feeds, accounts, groups, show }: { feeds: Feed[]; accounts: Account[]; groups: Group[]; show: (message: string) => void }) {
+export function FeedsPanel({ feeds, accounts, groups, show, canManage = true }: { feeds: Feed[]; accounts: Account[]; groups: Group[]; show: (message: string) => void; canManage?: boolean }) {
   const router = useRouter();
   // `editing` is the feed being changed, "new" for one being added, null when the dialog is shut.
   const [editing, setEditing] = useState<Feed | "new" | null>(null);
@@ -110,7 +110,7 @@ export function FeedsPanel({ feeds, accounts, groups, show }: { feeds: Feed[]; a
     <section className="mt-10" aria-label="Feeds">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h2 className="title text-2xl">Feeds</h2>
-        {feeds.length ? (
+        {feeds.length && canManage ? (
           <button type="button" className="btn btn-quiet btn-sm" onClick={() => start("new")}>
             <Icon name="plus" size={16} /> Add feed
           </button>
@@ -121,7 +121,9 @@ export function FeedsPanel({ feeds, accounts, groups, show }: { feeds: Feed[]; a
         <div className="panel mt-4 p-6">
           <p className="title text-lg">No feeds yet.</p>
           <p className="note mt-2 max-w-xl">Add the RSS or Atom address of a blog, a newsletter or a release page. Each new item becomes a post to the accounts you choose, saved as a draft for you to read first.</p>
-          {accounts.length ? (
+          {!canManage ? (
+            <p className="note mt-4">Feeds are added and changed by an admin of this Broadside.</p>
+          ) : accounts.length ? (
             <button type="button" className="btn btn-sm mt-4" onClick={() => start("new")}>
               <Icon name="plus" size={16} /> Add feed
             </button>
@@ -157,7 +159,7 @@ export function FeedsPanel({ feeds, accounts, groups, show }: { feeds: Feed[]; a
                     <dt className="note">{feed.group ? `Posts to the group ${feed.group.name ?? "that was deleted"}` : "Posts to"}</dt>
                     <dd className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
                       {feed.accounts.length === 0 ? (
-                        <span className="text-bad">No accounts left. Edit this feed to choose some.</span>
+                        <span className="text-bad">{canManage ? "No accounts left. Edit this feed to choose some." : "No accounts left."}</span>
                       ) : (
                         feed.accounts.map((account) => (
                           <span key={account.id} className="flex min-w-0 items-center gap-1.5">
@@ -223,42 +225,44 @@ export function FeedsPanel({ feeds, accounts, groups, show }: { feeds: Feed[]; a
                   ) : null}
                 </div>
 
-                <div className="mt-3 flex flex-wrap gap-2">
-                  <button type="button" className="btn btn-quiet btn-sm" disabled={busy !== null || feed.status === "paused"} onClick={() => checkNow(feed)}>
-                    {busy === `check:${feed.id}` ? <span className="spinner" /> : <Icon name="retry" size={16} />} Check now
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-quiet btn-sm"
-                    disabled={busy !== null}
-                    onClick={() =>
-                      act(feed, "preview", async () => {
-                        setPreview({ feed, result: await api<FeedPreview>(`/feeds/${feed.id}/test`, { method: "POST" }) });
-                      })
-                    }
-                  >
-                    {busy === `preview:${feed.id}` ? <span className="spinner" /> : null} Preview
-                  </button>
-                  <button type="button" className="btn btn-bare btn-sm" onClick={() => start(feed)} aria-label={`Edit the feed ${nameOf(feed)}`}>
-                    Edit
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-bare btn-sm"
-                    disabled={busy !== null}
-                    onClick={() =>
-                      act(feed, "pause", async () => {
-                        await api(`/feeds/${feed.id}`, { method: "PATCH", body: JSON.stringify({ paused: feed.status === "active" }) });
-                        return feed.status === "active" ? "Paused. This feed is not read until you resume it." : "Resumed. It posts what appears from now on.";
-                      })
-                    }
-                  >
-                    {feed.status === "active" ? "Pause" : "Resume"}
-                  </button>
-                  <button type="button" className="btn btn-bare btn-sm" disabled={busy !== null} onClick={() => remove(feed)} aria-label={`Delete the feed ${nameOf(feed)}`}>
-                    Delete
-                  </button>
-                </div>
+                {canManage ? (
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <button type="button" className="btn btn-quiet btn-sm" disabled={busy !== null || feed.status === "paused"} onClick={() => checkNow(feed)}>
+                      {busy === `check:${feed.id}` ? <span className="spinner" /> : <Icon name="retry" size={16} />} Check now
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-quiet btn-sm"
+                      disabled={busy !== null}
+                      onClick={() =>
+                        act(feed, "preview", async () => {
+                          setPreview({ feed, result: await api<FeedPreview>(`/feeds/${feed.id}/test`, { method: "POST" }) });
+                        })
+                      }
+                    >
+                      {busy === `preview:${feed.id}` ? <span className="spinner" /> : null} Preview
+                    </button>
+                    <button type="button" className="btn btn-bare btn-sm" onClick={() => start(feed)} aria-label={`Edit the feed ${nameOf(feed)}`}>
+                      Edit
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-bare btn-sm"
+                      disabled={busy !== null}
+                      onClick={() =>
+                        act(feed, "pause", async () => {
+                          await api(`/feeds/${feed.id}`, { method: "PATCH", body: JSON.stringify({ paused: feed.status === "active" }) });
+                          return feed.status === "active" ? "Paused. This feed is not read until you resume it." : "Resumed. It posts what appears from now on.";
+                        })
+                      }
+                    >
+                      {feed.status === "active" ? "Pause" : "Resume"}
+                    </button>
+                    <button type="button" className="btn btn-bare btn-sm" disabled={busy !== null} onClick={() => remove(feed)} aria-label={`Delete the feed ${nameOf(feed)}`}>
+                      Delete
+                    </button>
+                  </div>
+                ) : null}
               </li>
             );
           })}

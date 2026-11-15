@@ -35,7 +35,7 @@ const SHOWN = 4;
  * post. Not to be confused with the Webhook network under Accounts, which is
  * a place posts are sent to.
  */
-export function OutgoingPanel({ webhooks, show }: { webhooks: OutgoingWebhook[]; show: (message: string) => void }) {
+export function OutgoingPanel({ webhooks, show, canManage = true }: { webhooks: (OutgoingWebhook & { redacted?: true })[]; show: (message: string) => void; canManage?: boolean }) {
   const router = useRouter();
   const [editing, setEditing] = useState<OutgoingWebhook | "new" | null>(null);
   const [name, setName] = useState("");
@@ -113,7 +113,7 @@ export function OutgoingPanel({ webhooks, show }: { webhooks: OutgoingWebhook[];
     <section className="mt-14" aria-label="Outgoing webhooks">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h2 className="title text-2xl">Outgoing webhooks</h2>
-        {webhooks.length ? (
+        {webhooks.length && canManage ? (
           <button type="button" className="btn btn-quiet btn-sm" onClick={() => start("new")}>
             <Icon name="plus" size={16} /> Add outgoing webhook
           </button>
@@ -145,9 +145,13 @@ export function OutgoingPanel({ webhooks, show }: { webhooks: OutgoingWebhook[];
         <div className="panel mt-4 p-6">
           <p className="title text-lg">No outgoing webhooks yet.</p>
           <p className="note mt-2 max-w-xl">Add an address on your own server, or in Zapier, n8n or Make, and Broadside tells it what happened to each post, with the post attached.</p>
-          <button type="button" className="btn btn-sm mt-4" onClick={() => start("new")}>
-            <Icon name="plus" size={16} /> Add outgoing webhook
-          </button>
+          {canManage ? (
+            <button type="button" className="btn btn-sm mt-4" onClick={() => start("new")}>
+              <Icon name="plus" size={16} /> Add outgoing webhook
+            </button>
+          ) : (
+            <p className="note mt-4">Outgoing webhooks are added and changed by an admin of this Broadside.</p>
+          )}
         </div>
       ) : (
         <ul className="mt-4 space-y-2">
@@ -160,6 +164,7 @@ export function OutgoingPanel({ webhooks, show }: { webhooks: OutgoingWebhook[];
                   <div className="min-w-0 flex-1 basis-56">
                     <p className="truncate font-medium">{webhook.name}</p>
                     <p className="note truncate font-mono text-[13px]">{webhook.url}</p>
+                    {webhook.redacted ? <p className="note text-[13px]">Admins see the full address.</p> : null}
                   </div>
                   <span className="status" data-status={webhook.status === "paused" ? (webhook.paused_reason ? "failed" : "draft") : "published"}>
                     {webhook.status === "paused" && webhook.paused_reason ? <Icon name="alert" size={16} /> : null}
@@ -220,30 +225,32 @@ export function OutgoingPanel({ webhooks, show }: { webhooks: OutgoingWebhook[];
                   )}
                 </div>
 
-                <div className="mt-3 flex flex-wrap gap-2">
-                  <button type="button" className="btn btn-quiet btn-sm" disabled={busy !== null} onClick={() => sendTest(webhook)}>
-                    {busy === `test:${webhook.id}` ? <span className="spinner" /> : null} Send a test
-                  </button>
-                  <button type="button" className="btn btn-bare btn-sm" onClick={() => start(webhook)} aria-label={`Edit the outgoing webhook ${webhook.name}`}>
-                    Edit
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-bare btn-sm"
-                    disabled={busy !== null}
-                    onClick={() =>
-                      act(webhook, "pause", async () => {
-                        await api(`/outgoing-webhooks/${webhook.id}`, { method: "PATCH", body: JSON.stringify({ paused: webhook.status === "active" }) });
-                        return webhook.status === "active" ? "Paused. Nothing is sent until you resume it." : "Resumed.";
-                      })
-                    }
-                  >
-                    {webhook.status === "active" ? "Pause" : "Resume"}
-                  </button>
-                  <button type="button" className="btn btn-bare btn-sm" disabled={busy !== null} onClick={() => remove(webhook)} aria-label={`Delete the outgoing webhook ${webhook.name}`}>
-                    Delete
-                  </button>
-                </div>
+                {canManage ? (
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <button type="button" className="btn btn-quiet btn-sm" disabled={busy !== null} onClick={() => sendTest(webhook)}>
+                      {busy === `test:${webhook.id}` ? <span className="spinner" /> : null} Send a test
+                    </button>
+                    <button type="button" className="btn btn-bare btn-sm" onClick={() => start(webhook)} aria-label={`Edit the outgoing webhook ${webhook.name}`}>
+                      Edit
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-bare btn-sm"
+                      disabled={busy !== null}
+                      onClick={() =>
+                        act(webhook, "pause", async () => {
+                          await api(`/outgoing-webhooks/${webhook.id}`, { method: "PATCH", body: JSON.stringify({ paused: webhook.status === "active" }) });
+                          return webhook.status === "active" ? "Paused. Nothing is sent until you resume it." : "Resumed.";
+                        })
+                      }
+                    >
+                      {webhook.status === "active" ? "Pause" : "Resume"}
+                    </button>
+                    <button type="button" className="btn btn-bare btn-sm" disabled={busy !== null} onClick={() => remove(webhook)} aria-label={`Delete the outgoing webhook ${webhook.name}`}>
+                      Delete
+                    </button>
+                  </div>
+                ) : null}
               </li>
             );
           })}

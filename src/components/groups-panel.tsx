@@ -8,7 +8,7 @@ type Account = { id: string; platform: string; handle: string };
 export type GroupInfo = { id: string; name: string; account_ids: string[]; accounts: Account[] };
 
 /** Named sets of accounts. Picking one in the composer selects exactly its accounts. */
-export function GroupsPanel({ accounts, groups, show }: { accounts: Account[]; groups: GroupInfo[]; show: (message: string) => void }) {
+export function GroupsPanel({ accounts, groups, show, canWrite = true }: { accounts: Account[]; groups: GroupInfo[]; show: (message: string) => void; canWrite?: boolean }) {
   const router = useRouter();
   // `editing` is the group being changed, "new" for one being made, null when the dialog is shut.
   const [editing, setEditing] = useState<GroupInfo | "new" | null>(null);
@@ -61,7 +61,7 @@ export function GroupsPanel({ accounts, groups, show }: { accounts: Account[]; g
     <section className="mt-12" aria-label="Account groups">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h2 className="title text-2xl">Groups</h2>
-        {groups.length ? (
+        {groups.length && canWrite ? (
           <button type="button" className="btn btn-quiet btn-sm" onClick={() => start("new")}>
             <Icon name="plus" size={16} /> New group
           </button>
@@ -72,9 +72,11 @@ export function GroupsPanel({ accounts, groups, show }: { accounts: Account[]; g
         <div className="panel mt-4 p-6">
           <p className="title text-lg">No groups yet.</p>
           <p className="note mt-2 max-w-xl">A group is a named set of accounts, such as Launch day or Dev channels. Pick it in the composer and exactly those accounts are selected.</p>
-          <button type="button" className="btn btn-sm mt-4" onClick={() => start("new")}>
-            <Icon name="plus" size={16} /> New group
-          </button>
+          {canWrite ? (
+            <button type="button" className="btn btn-sm mt-4" onClick={() => start("new")}>
+              <Icon name="plus" size={16} /> New group
+            </button>
+          ) : null}
         </div>
       ) : (
         <ul className="mt-4 grid grid-cols-1 gap-2 md:grid-cols-2">
@@ -83,7 +85,7 @@ export function GroupsPanel({ accounts, groups, show }: { accounts: Account[]; g
               <span className="min-w-0 flex-1 basis-40">
                 <span className="block truncate font-medium">{group.name}</span>
                 {group.accounts.length === 0 ? (
-                  <span className="mt-1 block text-sm text-bad">No accounts left. Edit it to add some.</span>
+                  <span className="mt-1 block text-sm text-bad">{canWrite ? "No accounts left. Edit it to add some." : "No accounts left."}</span>
                 ) : (
                   <span className="mt-1.5 flex min-w-0 items-center gap-2">
                     <span className="flex flex-none items-center" aria-hidden="true">
@@ -97,14 +99,16 @@ export function GroupsPanel({ accounts, groups, show }: { accounts: Account[]; g
                   </span>
                 )}
               </span>
-              <span className="flex flex-none items-center">
-                <button type="button" className="btn btn-bare btn-sm" onClick={() => start(group)} aria-label={`Edit the group ${group.name}`}>
-                  Edit
-                </button>
-                <button type="button" className="btn btn-bare btn-sm" onClick={() => remove(group)} aria-label={`Delete the group ${group.name}`}>
-                  Delete
-                </button>
-              </span>
+              {canWrite ? (
+                <span className="flex flex-none items-center">
+                  <button type="button" className="btn btn-bare btn-sm" onClick={() => start(group)} aria-label={`Edit the group ${group.name}`}>
+                    Edit
+                  </button>
+                  <button type="button" className="btn btn-bare btn-sm" onClick={() => remove(group)} aria-label={`Delete the group ${group.name}`}>
+                    Delete
+                  </button>
+                </span>
+              ) : null}
             </li>
           ))}
         </ul>

@@ -14,19 +14,24 @@ const LINKS = [
   { href: "/app/automations", label: "Automations", icon: "bolt" },
   { href: "/app/accounts", label: "Accounts", icon: "accounts" },
   { href: "/app/connect", label: "Connect", icon: "connect" },
+  { href: "/app/team", label: "Team", icon: "team" },
 ];
 
 /** A phone's bar holds five things at most: the first four screens, then More, which opens the rest. */
 const ON_BAR = 4;
 const BAR_ITEM = "flex min-h-12 min-w-0 flex-1 flex-col items-center justify-center gap-0.5 rounded-md text-[11px] font-medium text-ink-2";
 
-/** A side rail on wide screens, a bottom bar on a phone: the same places, where a pointer or a thumb expects them. */
-export function Rail({ canSignOut = false }: { canSignOut?: boolean }) {
+/**
+ * A side rail on wide screens, a bottom bar on a phone: the same places, where a pointer or a thumb expects them.
+ * `member` is who is signed in, when the install has a team. Connect holds API keys, which are an admin's, so it is left out below that.
+ */
+export function Rail({ canSignOut = false, member, canConnect = true }: { canSignOut?: boolean; member?: { name: string; role: string }; canConnect?: boolean }) {
   const pathname = usePathname();
   const [more, setMore] = useState(false);
   const moreButton = useRef<HTMLButtonElement>(null);
-  const bar = LINKS.slice(0, ON_BAR);
-  const rest = LINKS.slice(ON_BAR);
+  const links = canConnect ? LINKS : LINKS.filter((link) => link.href !== "/app/connect");
+  const bar = links.slice(0, ON_BAR);
+  const rest = links.slice(ON_BAR);
   // When the screen in view is one of those behind More, More is the item that is lit.
   const behindMore = rest.find((link) => link.href === pathname);
 
@@ -53,7 +58,7 @@ export function Rail({ canSignOut = false }: { canSignOut?: boolean }) {
           <Wordmark size={20} />
         </Link>
         <nav className="flex flex-col gap-1" aria-label="App">
-          {LINKS.map((link) => (
+          {links.map((link) => (
             <Link key={link.href} href={link.href} className="rail-link" aria-current={pathname === link.href ? "page" : undefined}>
               <Icon name={link.icon} />
               {link.label}
@@ -61,6 +66,12 @@ export function Rail({ canSignOut = false }: { canSignOut?: boolean }) {
           ))}
         </nav>
         <div className="mt-auto">
+          {member ? (
+            <p className="note mb-1 flex gap-1 px-2">
+              <span className="truncate">{member.name}</span>
+              <span className="flex-none">{`(${member.role})`}</span>
+            </p>
+          ) : null}
           {canSignOut ? (
             <button type="button" className="rail-link w-full" onClick={signOut}>
               <Icon name="out" />
@@ -102,6 +113,12 @@ export function Rail({ canSignOut = false }: { canSignOut?: boolean }) {
                 {link.label}
               </Link>
             ))}
+            {member ? (
+              <p className="note flex gap-1 px-3 pt-1">
+                <span className="truncate">{member.name}</span>
+                <span className="flex-none">{`(${member.role})`}</span>
+              </p>
+            ) : null}
             {canSignOut ? (
               <button type="button" className="rail-link min-h-12 w-full" onClick={signOut}>
                 <Icon name="out" />

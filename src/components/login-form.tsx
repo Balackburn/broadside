@@ -2,7 +2,9 @@
 
 import { useState } from "react";
 
-export function LoginForm({ next }: { next: string }) {
+/** With a team, people sign in by name and their own password. Without one there is only the shared password. */
+export function LoginForm({ next, team = false }: { next: string; team?: boolean }) {
+  const [name, setName] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -12,7 +14,7 @@ export function LoginForm({ next }: { next: string }) {
     event.preventDefault();
     setBusy(true);
     setError(null);
-    const response = await fetch("/api/login", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ password }) });
+    const response = await fetch("/api/login", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(team ? { name, password } : { password }) });
     if (response.ok) {
       window.location.assign(next);
       return;
@@ -25,10 +27,18 @@ export function LoginForm({ next }: { next: string }) {
 
   return (
     <form onSubmit={submit} className={`mt-6 ${shake ? "is-shaking" : ""}`} key={shake}>
+      {team ? (
+        <>
+          <label className="label" htmlFor="name">
+            Name
+          </label>
+          <input id="name" type="text" className="field mb-4" autoComplete="username" autoCapitalize="none" autoFocus required value={name} onChange={(e) => setName(e.target.value)} aria-invalid={error ? true : undefined} />
+        </>
+      ) : null}
       <label className="label" htmlFor="password">
         Password
       </label>
-      <input id="password" type="password" className="field" autoComplete="current-password" autoFocus required value={password} onChange={(e) => setPassword(e.target.value)} aria-invalid={error ? true : undefined} />
+      <input id="password" type="password" className="field" autoComplete="current-password" autoFocus={!team} required value={password} onChange={(e) => setPassword(e.target.value)} aria-invalid={error ? true : undefined} />
       {error ? (
         <p className="mt-2 text-sm font-medium text-bad" role="alert">
           {error}

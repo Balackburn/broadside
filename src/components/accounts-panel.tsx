@@ -25,6 +25,8 @@ export function AccountsPanel({
   publicUrl,
   notice,
   choice,
+  canConnect = true,
+  canWrite = true,
 }: {
   accounts: Account[];
   platforms: Platform[];
@@ -34,11 +36,15 @@ export function AccountsPanel({
   publicUrl: string | null;
   notice?: { ok: boolean; text: string };
   choice?: Choice;
+  /** False below admin: accounts are listed, and connecting or disconnecting one is left out. */
+  canConnect?: boolean;
+  /** False for a viewer: groups and signatures are listed and cannot be changed. */
+  canWrite?: boolean;
 }) {
   const router = useRouter();
   const hydrated = useHydrated();
   const { show, toast } = useToast();
-  const [connecting, setConnecting] = useState<Platform | null>(() => platforms.find((p) => p.id === open) ?? null);
+  const [connecting, setConnecting] = useState<Platform | null>(() => (canConnect ? (platforms.find((p) => p.id === open) ?? null) : null));
   const [pasting, setPasting] = useState(false);
   const [values, setValues] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
@@ -157,7 +163,7 @@ export function AccountsPanel({
         {accounts.length === 0 ? (
           <div className="panel p-8">
             <p className="title text-xl">No accounts connected.</p>
-            <p className="note mt-2 max-w-lg">Pick a network below. You create the credentials yourself, and Broadside encrypts them on this machine.</p>
+            <p className="note mt-2 max-w-lg">{canConnect ? "Pick a network below. You create the credentials yourself, and Broadside encrypts them on this machine." : "An admin of this Broadside connects accounts. Once one is connected it is listed here."}</p>
           </div>
         ) : (
           <ul className="grid grid-cols-1 gap-2 md:grid-cols-2">
@@ -172,9 +178,11 @@ export function AccountsPanel({
                   {signatureNames[account.signature_id ?? ""] ? <span className="note block truncate">{`Offers the signature ${signatureNames[account.signature_id ?? ""]}`}</span> : null}
                   {account.status === "needs_attention" ? <span className="mt-1 block text-sm text-bad">{account.last_error ?? "This account needs reconnecting."}</span> : null}
                 </span>
-                <button type="button" className="btn btn-bare btn-sm" onClick={() => disconnect(account)}>
-                  Disconnect
-                </button>
+                {canConnect ? (
+                  <button type="button" className="btn btn-bare btn-sm" onClick={() => disconnect(account)}>
+                    Disconnect
+                  </button>
+                ) : null}
               </li>
             ))}
           </ul>
@@ -182,23 +190,27 @@ export function AccountsPanel({
       </section>
 
       {/* A group is made of connected accounts, so the section appears once there is one to put in it. */}
-      {accounts.length ? <GroupsPanel accounts={accounts} groups={groups} show={show} /> : null}
+      {accounts.length ? <GroupsPanel accounts={accounts} groups={groups} show={show} canWrite={canWrite} /> : null}
 
-      <section className="mt-12" aria-label="Add an account">
-        <h2 className="title text-2xl">Add an account</h2>
-        <ul className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">
-          {platforms.map((platform) => (
-            <li key={platform.id}>
-              <button type="button" className="chip w-full justify-start" style={{ borderRadius: "var(--r-2)", minHeight: 56, padding: "8px 12px" }} onClick={() => start(platform)}>
-                <Stamp platform={platform.id} />
-                <span className="truncate">{platform.name}</span>
-              </button>
-            </li>
-          ))}
-        </ul>
-      </section>
+      {canConnect ? (
+        <section className="mt-12" aria-label="Add an account">
+          <h2 className="title text-2xl">Add an account</h2>
+          <ul className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">
+            {platforms.map((platform) => (
+              <li key={platform.id}>
+                <button type="button" className="chip w-full justify-start" style={{ borderRadius: "var(--r-2)", minHeight: 56, padding: "8px 12px" }} onClick={() => start(platform)}>
+                  <Stamp platform={platform.id} />
+                  <span className="truncate">{platform.name}</span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : (
+        <p className="note mt-12">Connecting and disconnecting accounts is done by an admin of this Broadside.</p>
+      )}
 
-      <SignaturesPanel accounts={accounts} signatures={signatures} show={show} />
+      <SignaturesPanel accounts={accounts} signatures={signatures} show={show} canWrite={canWrite} />
 
       <Dialog open={connecting !== null} onClose={() => setConnecting(null)} title={connecting ? `Connect ${connecting.name}` : "Connect"}>
         {connecting ? (

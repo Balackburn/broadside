@@ -61,6 +61,7 @@ const paths: Record<string, ReactNode> = {
   up: <path d="M12 19V5M6 11l6-6 6 6" />,
   bolt: <path d="M13 3 5 13.5h6L10 21l9-10.5h-6L13 3Z" />,
   feed: <path d="M5 19h.01M5 12a7 7 0 0 1 7 7M5 5a14 14 0 0 1 14 14" />,
+  team: <path d="M4 6h16v12H4zM9 11.5a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3ZM6.5 15.5a2.5 2.5 0 0 1 5 0M14 10h3.5M14 13.5h3.5" />,
   more: <path d="M4.5 12a1 1 0 1 0 2 0 1 1 0 0 0-2 0ZM11 12a1 1 0 1 0 2 0 1 1 0 0 0-2 0ZM17.5 12a1 1 0 1 0 2 0 1 1 0 0 0-2 0Z" />,
 };
 

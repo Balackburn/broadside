@@ -21,6 +21,7 @@ type Post = {
   origin: string;
   feed: { id: string; title: string | null } | null;
   held_reason: string | null;
+  author?: { id: string; name: string | null } | null;
   repeat: { every: "day" | "week" | "month"; until: string | null } | null;
   series: { id: string; active: boolean } | null;
   targets: Target[];
@@ -45,8 +46,25 @@ const matches = (post: Post, filter: Filter) =>
 /**
  * `numbers` holds what Broadside has read back for each published target, by target id. A target that has not gone out has no entry.
  * `feed` is set when the list was asked for one feed's posts only; its title is another site's text and is shown as text.
+ * `canWrite` is false for a viewer, who reads the list and gets none of its buttons. `authors` is true when the install has a team, and each post then says who wrote it.
  */
-export function PostsList({ posts, tags, numbers = {}, focus, feed }: { posts: Post[]; tags: TagInfo[]; numbers?: Record<string, TargetNumbers>; focus?: string; feed?: { id: string; title: string | null } }) {
+export function PostsList({
+  posts,
+  tags,
+  numbers = {},
+  focus,
+  feed,
+  canWrite = true,
+  authors = false,
+}: {
+  posts: Post[];
+  tags: TagInfo[];
+  numbers?: Record<string, TargetNumbers>;
+  focus?: string;
+  feed?: { id: string; title: string | null };
+  canWrite?: boolean;
+  authors?: boolean;
+}) {
   const router = useRouter();
   const { show, toast } = useToast();
   const [filter, setFilter] = useState<Filter>("all");
@@ -110,9 +128,11 @@ export function PostsList({ posts, tags, numbers = {}, focus, feed }: { posts: P
       {tags.length ? (
         <div className="mt-4 flex flex-wrap items-start justify-between gap-x-4 gap-y-2">
           <TagFilter tags={tags.map((t) => t.name)} value={filterTag} onChange={setTag} />
-          <button type="button" className="btn btn-bare btn-sm -mr-3 ml-auto min-h-7" onClick={() => setManaging(true)}>
-            Manage tags
-          </button>
+          {canWrite ? (
+            <button type="button" className="btn btn-bare btn-sm -mr-3 ml-auto min-h-7" onClick={() => setManaging(true)}>
+              Manage tags
+            </button>
+          ) : null}
         </div>
       ) : null}
 
@@ -131,7 +151,7 @@ export function PostsList({ posts, tags, numbers = {}, focus, feed }: { posts: P
         <div className="panel mt-8 p-10 text-center">
           <p className="title text-xl">{posts.length === 0 ? (feed ? "This feed has made no posts yet." : "Nothing posted yet.") : "No posts here."}</p>
           <p className="note mt-2">{posts.length === 0 ? (feed ? "When a new item appears in the feed, the post made from it lands here." : "Posts you send from the app, an agent or the API all land in this list.") : "Try another filter."}</p>
-          {posts.length === 0 && !feed ? (
+          {posts.length === 0 && !feed && canWrite ? (
             <Link className="btn mt-6" href="/app">
               Write a post
             </Link>
@@ -141,7 +161,8 @@ export function PostsList({ posts, tags, numbers = {}, focus, feed }: { posts: P
         <ul className="mt-6 space-y-2">
           {shown.map((post) => {
             const expanded = open === post.id;
-            const editable = post.status === "scheduled" || post.status === "draft";
+            const editable = canWrite && (post.status === "scheduled" || post.status === "draft");
+            const author = authors && post.author ? (post.author.name ?? "a member who has been removed") : null;
             const series = post.series ? posts.filter((p) => p.series?.id === post.series?.id).sort((a, b) => (a.publish_at ?? a.created_at).localeCompare(b.publish_at ?? b.created_at)) : [];
             return (
               <li key={post.id} className="panel overflow-hidden">
@@ -153,6 +174,7 @@ export function PostsList({ posts, tags, numbers = {}, focus, feed }: { posts: P
                         <Time iso={post.publish_at ?? post.created_at} />
                       </span>
                       <span>{ORIGIN[post.origin] ?? post.origin}</span>
+                      {author ? <span>{`By ${author}`}</span> : null}
                       {post.held_reason ? <span className="text-bad">Does not fit yet</span> : null}
                       {post.media.length ? <span>{post.media.length} media</span> : null}
                       {post.thread.length ? <span>{`Thread of ${post.thread.length + 1}`}</span> : null}
@@ -173,6 +195,7 @@ export function PostsList({ posts, tags, numbers = {}, focus, feed }: { posts: P
                 </button>
                 {expanded ? (
                   <div className="bg-paper-2 p-4">
+                    {author ? <p className="note mb-3">{`Written by ${author}.`}</p> : null}
                     {post.feed ? (
                       <p className="note mb-3">
                         {"Made from an item in the feed "}
@@ -213,7 +236,7 @@ export function PostsList({ posts, tags, numbers = {}, focus, feed }: { posts: P
                                   Open <Icon name="out" size={14} />
                                 </a>
                               ) : null}
-                              {t.status === "failed" ? (
+                              {t.status === "failed" && canWrite ? (
                                 <button type="button" className="btn btn-quiet btn-sm" disabled={busy === t.id} onClick={() => act(t.id, `/posts/${post.id}/targets/${t.id}/retry`, "POST", "Sent again.")}>
                                   <Icon name="retry" size={16} /> Retry
                                 </button>
@@ -260,7 +283,9 @@ export function PostsList({ posts, tags, numbers = {}, focus, feed }: { posts: P
                               </span>
                             ) : null}
                           </span>
-                          {post.series.active ? (
+                          {!canWrite ? (
+                            <span className="note">{post.series.active ? "Repeating" : "Ended"}</span>
+                          ) : post.series.active ? (
                             <button
                               type="button"
                               className="btn btn-quiet btn-sm"
@@ -292,7 +317,7 @@ export function PostsList({ posts, tags, numbers = {}, focus, feed }: { posts: P
                           Edit
                         </Link>
                       ) : null}
-                      {post.targets.some((t) => numbers[t.id]?.available) ? (
+                      {canWrite && post.targets.some((t) => numbers[t.id]?.available) ? (
                         <button type="button" className="btn btn-quiet btn-sm" disabled={busy === post.id} onClick={() => refresh(post)}>
                           <Icon name="retry" size={16} /> Refresh numbers
                         </button>
@@ -312,16 +337,18 @@ export function PostsList({ posts, tags, numbers = {}, focus, feed }: { posts: P
                           {post.repeat && post.status === "scheduled" ? "Cancel this one" : "Cancel"}
                         </button>
                       ) : null}
-                      <button
-                        type="button"
-                        className="btn btn-bare btn-sm"
-                        disabled={busy === post.id}
-                        onClick={() => {
-                          if (window.confirm("Remove this post from Broadside's history? Anything already published stays on its network.")) void act(post.id, `/posts/${post.id}`, "DELETE", "Removed from history.");
-                        }}
-                      >
-                        Remove from history
-                      </button>
+                      {canWrite ? (
+                        <button
+                          type="button"
+                          className="btn btn-bare btn-sm"
+                          disabled={busy === post.id}
+                          onClick={() => {
+                            if (window.confirm("Remove this post from Broadside's history? Anything already published stays on its network.")) void act(post.id, `/posts/${post.id}`, "DELETE", "Removed from history.");
+                          }}
+                        >
+                          Remove from history
+                        </button>
+                      ) : null}
                     </div>
                   </div>
                 ) : null}
