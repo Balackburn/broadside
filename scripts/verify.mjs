@@ -325,6 +325,15 @@ try {
     const html = await response.text();
     ok(response.status === 200 && html.includes(marker), `Page ${pathname} renders`, `status ${response.status}`);
   }
+  // Signing in with a network
+  const begun = await api("/api/v1/oauth/tiktok/start", { method: "POST", headers: auth, body: JSON.stringify({ credentials: { client_key: "ck", client_secret: "verify-client-secret" } }) });
+  const authorize = new URL(begun.body.data.url);
+  ok(authorize.host === "www.tiktok.com" && authorize.searchParams.get("redirect_uri") === `${base}/oauth/tiktok/callback` && /^[0-9a-f]{64}$/.test(authorize.searchParams.get("code_challenge")) && !begun.body.data.url.includes("verify-client-secret"), "Continue with TikTok sends the browser to TikTok with the local redirect address and no secret in the URL");
+  const forged = await fetch(`${base}/oauth/tiktok/callback?code=x&state=made-up`, { redirect: "manual" });
+  ok(forged.status === 303 && (new URL(forged.headers.get("location")).searchParams.get("error") ?? "").includes("not started here"), "A callback with a state this Broadside never issued connects nothing");
+  const tiktokSpec = platforms.find((p) => p.id === "tiktok");
+  ok(tiktokSpec.oauth?.callback_path === "/oauth/tiktok/callback" && !tiktokSpec.fields.some((f) => f.key === "refresh_token"), "The TikTok connect form asks for the app's key and secret only");
+
   // Editing a saved post in the app
   const toEdit = await api("/api/v1/posts", { method: "POST", headers: auth, body: JSON.stringify({ content: "editable in the app", targets: [{ account_id: ids.sandbox }, { account_id: ids.mastodon, content_override: "mastodon wording" }], publish_at: new Date(Date.now() + 3600000).toISOString() }) });
   const editPage = await fetch(`${base}/app?edit=${toEdit.body.data.id}`).then((r) => r.text());

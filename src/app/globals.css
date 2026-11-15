@@ -1,4 +1,4 @@
-/* Hallmark · v2.0.0 · theme: custom · a dark room and lit paper: black ground, bone ink, printed sheets as the only bright surfaces, one red spot colour · signature: one post as a sheet per network on a turntable you can swipe · Bricolage Grotesque (condensed) over Geist */
+/* Hallmark · v2.0.0 · theme: custom, after Resend by request (black ground, serif display with a lit fill, hairline glass cards) · signature: one post as a card per network on a turntable you can swipe · Instrument Serif over Geist */
 /* critique: the fan carries the first screen; below it the page leans on type and tone fields with no photographs, by choice (no honest picture of this product exists but its own interface) */
 @import "tailwindcss";
 
@@ -9,7 +9,7 @@
   --paper: oklch(0 0 0);
   --paper-2: oklch(0.155 0.004 250);
   --paper-3: oklch(0.215 0.005 250);
-  --ink: oklch(0.95 0.01 85);
+  --ink: oklch(0.955 0.002 250);
   --ink-2: oklch(0.715 0.006 220);
   --ink-3: oklch(0.55 0.006 220);
   --line: oklch(0.93 0.03 240 / 0.14);
@@ -23,22 +23,10 @@
   --float-shadow: 0 0 0 1px oklch(0.93 0.03 240 / 0.14), 0 24px 60px -12px oklch(0 0 0 / 0.9);
   --pill-shadow: 0 0 0 1px oklch(0.93 0.03 240 / 0.14);
 
-  /* Paper: a post is a printed sheet, the one bright thing in a dark room. */
-  --sheet: oklch(0.955 0.014 85);
-  --sheet-2: oklch(0.9 0.016 85);
-  --sheet-ink: oklch(0.2 0.012 262);
-  --sheet-ink-2: oklch(0.42 0.012 262);
-  --sheet-good: oklch(0.47 0.13 152);
-  --sheet-bad: oklch(0.5 0.2 27);
-  --sheet-line: oklch(0.2 0.012 262 / 0.14);
-  --sheet-shadow: 0 1px 0 oklch(1 0 0 / 0.6) inset, 0 30px 60px -20px oklch(0 0 0 / 0.9);
-  --halftone: radial-gradient(circle at center, oklch(0.95 0.01 85 / 0.2) 1px, oklch(0 0 0 / 0) 1.7px);
-  --spot: radial-gradient(50% 50% at 50% 50%, oklch(0 0 0) 0%, oklch(0 0 0 / 0) 100%);
-
   /* Read by the vendored carousel. */
   --bg: oklch(0 0 0);
   --font-ui: var(--font-geist), system-ui, sans-serif;
-  --ink-rgb: 240, 237, 229;
+  --ink-rgb: 240, 240, 240;
   --shadow-rgb: 0, 0, 0;
 
   /* Light: how surfaces catch it. */
@@ -57,7 +45,7 @@
   --fade-ends: linear-gradient(oklch(0 0 0 / 0), oklch(0 0 0) 30%, oklch(0 0 0) 65%, oklch(0 0 0 / 0));
   --fade-sides: linear-gradient(90deg, oklch(0 0 0 / 0), oklch(0 0 0) 14%, oklch(0 0 0) 86%, oklch(0 0 0 / 0));
 
-  --font-display: var(--font-poster), "Helvetica Neue", sans-serif;
+  --font-display: var(--font-serif), Georgia, serif;
   --font-text: var(--font-geist), system-ui, sans-serif;
   --font-code: var(--font-geist-mono), ui-monospace, monospace;
 
@@ -133,17 +121,20 @@
 
   /* Type --------------------------------------------------------------------- */
 
-  /* Display: a condensed poster face, the voice of a printed bill. */
+  /* Display: a serif set large, lit from the top left. */
   .display {
     font-family: var(--font-display);
-    font-variation-settings: "wdth" 76, "opsz" 96;
-    font-weight: 800;
-    line-height: 0.92;
-    letter-spacing: -0.03em;
+    font-weight: 400;
+    line-height: 1;
+    letter-spacing: -0.012em;
     text-wrap: balance;
     overflow-wrap: break-word;
     min-width: 0;
-    color: var(--ink);
+    padding-bottom: 0.08em;
+    background-image: var(--text-fill);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
   }
 
   /* Section heads: the text face, regular weight, drawn tight. */
@@ -930,40 +921,6 @@
 
   /* Broadside's own ------------------------------------------------------- */
 
-  /* A sheet of paper: tokens are re-pointed inside it, so anything drawn on paper reads as ink. */
-  .paper {
-    --ink: var(--sheet-ink);
-    --ink-2: var(--sheet-ink-2);
-    --ink-3: var(--sheet-ink-2);
-    --good: var(--sheet-good);
-    --bad: var(--sheet-bad);
-    --line: var(--sheet-line);
-    --paper-3: var(--sheet-ink);
-    background-color: var(--sheet);
-    background-image: none;
-    color: var(--sheet-ink);
-    box-shadow: var(--sheet-shadow);
-  }
-  .paper .stamp {
-    background: var(--sheet-ink);
-    color: var(--sheet);
-    box-shadow: none;
-  }
-  .paper[data-over="true"] {
-    box-shadow: inset 0 0 0 2px var(--sheet-bad), var(--sheet-shadow);
-  }
-
-  /* Halftone: the dot screen of a press, fading out from under the hero. */
-  .halftone {
-    position: absolute;
-    inset: 0;
-    background-image: var(--halftone);
-    background-size: 9px 9px;
-    -webkit-mask-image: var(--spot);
-    mask-image: var(--spot);
-    pointer-events: none;
-  }
-
   /* The hero ring sits on Bencho's fixed stage, enlarged on wide screens. */
   .hero-ring {
     display: grid;
@@ -983,6 +940,7 @@
       zoom: 1.3;
     }
   }
+  /* Each card on the ring: dark glass with light on its top edge. */
   .ring-face {
     position: absolute;
     inset: 0;
@@ -991,19 +949,18 @@
     padding: 14px;
     border-radius: inherit;
     text-align: left;
+    background-color: var(--paper);
+    background-image: var(--card-light), var(--card-fill);
+    box-shadow: inset 0 0 0 1px var(--line-strong);
+    color: var(--ink);
   }
-
-  /* Type being set: each letter swings up into place once (Obsidian UI flip text). */
-  .flip-char {
-    transform-origin: 50% 100%;
-    backface-visibility: hidden;
-    animation: flip-in var(--flip-duration) var(--ease-smooth-out) var(--flip-delay) var(--flip-iteration) both;
+  /* Fanned sheets overlap, so each is opaque and lifts off the one beneath. */
+  .fan-sheet {
+    background-image: var(--card-light), var(--card-fill);
+    box-shadow: inset 0 0 0 1px var(--line-strong), var(--float-shadow);
   }
-  @keyframes flip-in {
-    from {
-      opacity: 0;
-      transform: rotateX(-88deg) translateY(0.12em);
-    }
+  .fan-sheet[data-over="true"] {
+    box-shadow: inset 0 0 0 2px var(--bad), var(--float-shadow);
   }
 
 }
@@ -1023,7 +980,6 @@
   .fan-sheet,
   .drop,
   .scale-in,
-  .flip-char,
   .pill::before,
   .shimmer,
   .caret::after {

@@ -71,7 +71,7 @@ function Sheet({
   const over = length > network.limits.maxChars;
   return (
     <article
-      className={`sheet paper ${className ?? ""}`}
+      className={`sheet ${className ?? ""}`}
       data-over={over}
       style={style}
     >

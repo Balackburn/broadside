@@ -3,13 +3,14 @@
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import type { CredentialField, Limits } from "@/lib/platforms/types";
-import { api, Dialog, Icon, Stamp, Time, useToast } from "./ui";
+import { api, CopyButton, Dialog, Icon, Stamp, Time, useHydrated, useToast } from "./ui";
 
 type Account = { id: string; platform: string; label: string; handle: string; status: string; last_error: string | null; created_at: string };
-type Platform = { id: string; name: string; docs_url: string; setup: string[]; fields: CredentialField[]; limits: Limits };
+type Platform = { id: string; name: string; docs_url: string; setup: string[]; fields: CredentialField[]; limits: Limits; oauth: { callback_path: string; scopes: string[] } | null };
 
-export function AccountsPanel({ accounts, platforms, open, hasPublicUrl }: { accounts: Account[]; platforms: Platform[]; open?: string; hasPublicUrl: boolean }) {
+export function AccountsPanel({ accounts, platforms, open, hasPublicUrl, notice }: { accounts: Account[]; platforms: Platform[]; open?: string; hasPublicUrl: boolean; notice?: { ok: boolean; text: string } }) {
   const router = useRouter();
+  const hydrated = useHydrated();
   const { show, toast } = useToast();
   const [connecting, setConnecting] = useState<Platform | null>(() => platforms.find((p) => p.id === open) ?? null);
   const [values, setValues] = useState<Record<string, string>>({});
@@ -28,6 +29,18 @@ export function AccountsPanel({ accounts, platforms, open, hasPublicUrl }: { acc
     if (!connecting) return;
     setBusy(true);
     setError(null);
+    if (connecting.oauth) {
+      // Signing in: Broadside keeps the key and secret for ten minutes while you approve on the network's own page.
+      try {
+        const { url } = await api<{ url: string }>(`/oauth/${connecting.id}/start`, { method: "POST", body: JSON.stringify({ credentials: values }) });
+        window.location.href = url;
+      } catch (cause) {
+        setError((cause as Error).message);
+        setShake((n) => n + 1);
+        setBusy(false);
+      }
+      return;
+    }
     try {
       const account = await api<Account>("/accounts", { method: "POST", body: JSON.stringify({ platform: connecting.id, credentials: values }) });
       setConnecting(null);
@@ -56,6 +69,12 @@ export function AccountsPanel({ accounts, platforms, open, hasPublicUrl }: { acc
   return (
     <div>
       <h1 className="heading text-4xl">Accounts</h1>
+
+      {notice ? (
+        <p className="sheet mt-6 text-[15px]" role="status" style={{ boxShadow: `inset 0 0 0 1px ${notice.ok ? "var(--good)" : "var(--bad)"}` }}>
+          {notice.text}
+        </p>
+      ) : null}
 
       <section className="mt-6" aria-label="Connected accounts">
         {accounts.length === 0 ? (
@@ -116,6 +135,15 @@ export function AccountsPanel({ accounts, platforms, open, hasPublicUrl }: { acc
                 {connecting.name} fetches media from a public address. Text posts work now; to send uploaded media, set BROADSIDE_PUBLIC_URL to where this app is reachable from the internet.
               </p>
             ) : null}
+            {connecting.oauth ? (
+              <div className="mt-4 rounded-md bg-paper-2 p-3 text-sm leading-snug">
+                <p className="font-medium">Redirect address to add in your {connecting.name} app</p>
+                <div className="mt-2 flex items-center gap-2">
+                  <code className="min-w-0 flex-1 truncate font-mono text-[13px]">{hydrated ? `${window.location.origin}${connecting.oauth.callback_path}` : connecting.oauth.callback_path}</code>
+                  {hydrated ? <CopyButton text={`${window.location.origin}${connecting.oauth.callback_path}`} /> : null}
+                </div>
+              </div>
+            ) : null}
             <div className="mt-5 space-y-4">
               {connecting.fields.map((field, i) => (
                 <div key={field.key}>
@@ -150,7 +178,7 @@ export function AccountsPanel({ accounts, platforms, open, hasPublicUrl }: { acc
               </button>
               <button type="submit" className="btn btn-signal" disabled={busy}>
                 {busy ? <span className="spinner" /> : null}
-                {busy ? "Checking" : "Connect"}
+                {connecting.oauth ? (busy ? "Opening" : `Continue with ${connecting.name}`) : busy ? "Checking" : "Connect"}
               </button>
             </div>
           </form>

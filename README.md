@@ -148,15 +148,12 @@ Adding a network is one object that implements `Connector` in `src/lib/platforms
 
 ## Design
 
-A dark room and lit paper: a black ground, bone-white text set in a condensed poster face (Bricolage Grotesque) over Geist, and posts drawn as printed sheets, the only bright surfaces on the page. One red is the spot colour.
+Dark, after Resend's site: a black ground, a serif display face (Instrument Serif) with a lit fill over Geist, hairline glass cards with light on their top edge, and one red as the signal colour. No fonts, renders or code come from Resend.
 
-Borrowed, with thanks, and all MIT licensed:
+Borrowed, with thanks:
 
-- The hero turntable is the Carousel block from [bencho.dev](https://bencho.dev), adapted to hold a sheet per network. Only Bencho blocks under its MIT licence are used; its Pro blocks may not be redistributed, so none are in this repository.
-- The headline's letter-by-letter entrance is FlipText from [Obsidian UI](https://www.obsidianui.dev).
+- The hero turntable is the Carousel block from [bencho.dev](https://bencho.dev) (MIT), adapted to hold a card per network. Only Bencho blocks under its MIT licence are used; its Pro blocks may not be redistributed, so none are in this repository.
 - Network logos come from the CC0 [Simple Icons](https://simpleicons.org) set and belong to their owners. LinkedIn, Slack and Nostr are not in that set, so they show initials.
-
-The layout rhythm (hairline cards, section tiles, a 3D object in the hero) was learned from Resend's site. No fonts, renders or code come from it.
 
 ## Licence
 

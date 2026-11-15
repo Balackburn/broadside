@@ -16,6 +16,8 @@ const { authorized, createKey, revokeKey } = await import("@/lib/keys");
 const { deleteMedia, getMedia, importMedia, saveMedia, sniff } = await import("@/lib/media");
 const { guardedFetch, isPrivateAddress } = await import("@/lib/net");
 const { hostAllowed } = await import("@/lib/hosts");
+const { finishOAuth, startOAuth } = await import("@/lib/oauth");
+const { createHash } = await import("node:crypto");
 const { sessionValue, signedIn, SESSION_COOKIE } = await import("@/lib/session");
 const { aggregate, cancelPost, createPost, dueTargets, getPost, publishNow, recoverInterrupted, retryTarget, updatePost } = await import("@/lib/posts");
 const { tick } = await import("@/lib/scheduler");
@@ -239,6 +241,68 @@ describe("stored media", () => {
     const real = saveMedia(new Uint8Array([137, 80, 78, 71]), "one.png", "image/png");
     expect(deleteMedia(real.id)).toBe(true);
     expect(deleteMedia(real.id)).toBe(false);
+  });
+});
+
+describe("signing in with TikTok", () => {
+  const base = "http://localhost:3000";
+  const tiktok = (async (input: RequestInfo | URL, init: RequestInit = {}) => {
+    const url = String(input);
+    const form = init.body instanceof URLSearchParams ? Object.fromEntries(init.body) : {};
+    if (url.endsWith("/oauth/token/") && form.grant_type === "authorization_code") {
+      if (form.code !== "good-code") return Response.json({ error: "invalid_grant", error_description: "Authorization code is expired" }, { status: 400 });
+      return Response.json({ access_token: "at-1", refresh_token: "rt-1", open_id: "u1" });
+    }
+    if (url.endsWith("/oauth/token/")) return Response.json({ access_token: "at-2", refresh_token: "rt-2" });
+    return Response.json({ data: { user: { display_name: "Test Creator" } } });
+  }) as typeof fetch;
+  const begin = () => {
+    const { url } = startOAuth("tiktok", { client_key: "ck", client_secret: "cs" }, base);
+    return new URL(url);
+  };
+
+  it("sends the browser to TikTok with a hex SHA-256 challenge and the local redirect address", () => {
+    const url = begin();
+    expect(url.origin + url.pathname).toBe("https://www.tiktok.com/v2/auth/authorize/");
+    expect(url.searchParams.get("client_key")).toBe("ck");
+    expect(url.searchParams.get("redirect_uri")).toBe("http://localhost:3000/oauth/tiktok/callback");
+    expect(url.searchParams.get("scope")).toBe("user.info.basic,video.upload,video.publish");
+    expect(url.searchParams.get("code_challenge")).toMatch(/^[0-9a-f]{64}$/);
+    expect(url.searchParams.get("code_challenge_method")).toBe("S256");
+    expect(url.toString()).not.toContain("cs");
+  });
+
+  it("exchanges the code with the verifier that matches the challenge, and connects the account", async () => {
+    const seen: Record<string, string>[] = [];
+    const recording = (async (input: RequestInfo | URL, init: RequestInit = {}) => {
+      if (init.body instanceof URLSearchParams) seen.push(Object.fromEntries(init.body));
+      return tiktok(input, init);
+    }) as typeof fetch;
+    const url = begin();
+    const account = await finishOAuth("tiktok", url.searchParams.get("state")!, "good-code", recording);
+    expect(account).toMatchObject({ platform: "tiktok", handle: "Test Creator" });
+    expect(seen[0]).toMatchObject({ client_key: "ck", client_secret: "cs", code: "good-code", redirect_uri: "http://localhost:3000/oauth/tiktok/callback" });
+    expect(createHash("sha256").update(seen[0].code_verifier).digest("hex")).toBe(url.searchParams.get("code_challenge"));
+    // The stored token is the one TikTok rotated to when the account was checked.
+    expect(credentialsOf(account.id).refresh_token).toBe("rt-2");
+  });
+
+  it("uses a state once, and refuses one it never issued", async () => {
+    const state = begin().searchParams.get("state")!;
+    await finishOAuth("tiktok", state, "good-code", tiktok);
+    await expect(finishOAuth("tiktok", state, "good-code", tiktok)).rejects.toThrow(/not started here, or it was already used/);
+    await expect(finishOAuth("tiktok", "made-up", "good-code", tiktok)).rejects.toThrow(/not started here/);
+  });
+
+  it("reports TikTok's own reason when the code is refused, and stores nothing", async () => {
+    const before = listAccounts().length;
+    await expect(finishOAuth("tiktok", begin().searchParams.get("state")!, "bad-code", tiktok)).rejects.toThrow(/Authorization code is expired/);
+    expect(listAccounts().length).toBe(before);
+  });
+
+  it("asks for the key and secret before starting, and only signs in where the network supports it", () => {
+    expect(() => startOAuth("tiktok", { client_key: "ck" }, base)).toThrow("Client secret is required to connect TikTok.");
+    expect(() => startOAuth("mastodon", {}, base)).toThrow(/pasting credentials/);
   });
 });
 

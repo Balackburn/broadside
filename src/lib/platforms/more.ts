@@ -331,15 +331,23 @@ export const tiktok: Connector = {
   name: "TikTok",
   docsUrl: "https://developers.tiktok.com/doc/content-posting-api-get-started",
   setup: [
-    "Create an app at developers.tiktok.com with Login Kit and the Content Posting API (Direct Post enabled).",
-    "Authorise your own account for the scopes user.info.basic, video.publish and video.upload, and keep the refresh token.",
-    "Paste the client key, client secret and refresh token. Until TikTok audits your app, posts are private or go to your inbox as drafts.",
+    "Create an app at developers.tiktok.com and add two products: Login Kit and Content Posting API.",
+    "In Login Kit choose Desktop and add the redirect address shown below, exactly as written.",
+    "While the app is in sandbox, add your own TikTok account under Sandbox, Target users.",
+    "Paste the client key and client secret here, then continue to TikTok and approve.",
+    "Until TikTok audits your app, posts are private or arrive in your TikTok inbox as drafts.",
   ],
   fields: [
     { key: "client_key", label: "Client key", kind: "text" },
     { key: "client_secret", label: "Client secret", kind: "secret" },
-    { key: "refresh_token", label: "Refresh token", kind: "secret" },
+    { key: "scopes", label: "Scopes", kind: "text", optional: true, placeholder: "user.info.basic,video.upload,video.publish", help: "Leave empty unless your app lacks one of these; then list only the ones it has." },
+    { key: "refresh_token", label: "Refresh token", kind: "secret", hidden: true },
   ],
+  oauth: {
+    authorizeUrl: "https://www.tiktok.com/v2/auth/authorize/",
+    tokenUrl: "https://open.tiktokapis.com/v2/oauth/token/",
+    scopes: ["user.info.basic", "video.upload", "video.publish"],
+  },
   options: [
     { key: "publish_mode", label: "Publish as", kind: "select", choices: ["draft", "direct"], help: "Draft sends it to your TikTok inbox to finish in the app." },
     { key: "privacy", label: "Who can watch", kind: "select", choices: ["SELF_ONLY", "MUTUAL_FOLLOW_FRIENDS", "FOLLOWER_OF_CREATOR", "PUBLIC_TO_EVERYONE"] },

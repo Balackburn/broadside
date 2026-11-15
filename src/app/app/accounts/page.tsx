@@ -8,6 +8,7 @@ export const dynamic = "force-dynamic";
 export const metadata: Metadata = { title: "Accounts" };
 
 export default async function AccountsPage({ searchParams }: PageProps<"/app/accounts">) {
-  const { connect } = await searchParams;
-  return <AccountsPanel accounts={listAccounts()} platforms={connectors.map(describe)} open={typeof connect === "string" ? connect : undefined} hasPublicUrl={Boolean(publicBase())} />;
+  const { connect, connected, error } = await searchParams;
+  const notice = typeof connected === "string" ? { ok: true, text: `Connected ${connected}.` } : typeof error === "string" ? { ok: false, text: error } : undefined;
+  return <AccountsPanel accounts={listAccounts()} platforms={connectors.map(describe)} open={typeof connect === "string" ? connect : undefined} hasPublicUrl={Boolean(publicBase())} notice={notice} />;
 }

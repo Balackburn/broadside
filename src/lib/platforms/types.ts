@@ -14,7 +14,12 @@ export type CredentialField = {
   placeholder?: string;
   help?: string;
   optional?: boolean;
+  /** Filled in by signing in with the network, so the connect form does not ask for it. */
+  hidden?: boolean;
 };
+
+/** A network that connects by sending you to its own approval page. */
+export type OAuthSpec = { authorizeUrl: string; tokenUrl: string; scopes: string[] };
 
 export type MediaItem = {
   id: string;
@@ -77,6 +82,7 @@ export type Connector = {
   docsUrl: string;
   fields: CredentialField[];
   options?: OptionSpec[];
+  oauth?: OAuthSpec;
   limits: Limits;
   verify: (credentials: Credentials, ctx: Context) => Promise<Profile>;
   publish: (input: PublishInput, credentials: Credentials, ctx: Context) => Promise<PublishResult>;

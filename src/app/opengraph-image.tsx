@@ -4,7 +4,7 @@ export const alt = "Broadside: one post, every network";
 export const size = { width: 1200, height: 630 };
 export const contentType = "image/png";
 
-const INK = "#f0ede5";
+const INK = "#f0f0f0";
 const PAPER = "#000000";
 const SIGNAL = "#f0503a";
 

@@ -36,7 +36,17 @@ export { measure, problems, type MediaShape } from "./measure";
 
 /** What the UI and agents need to know about a network, without its code. */
 export function describe(c: Connector) {
-  return { id: c.id, name: c.name, docs_url: c.docsUrl, setup: c.setup, fields: c.fields, options: c.options ?? [], limits: c.limits };
+  return {
+    id: c.id,
+    name: c.name,
+    docs_url: c.docsUrl,
+    setup: c.setup,
+    fields: c.fields.filter((f) => !f.hidden),
+    options: c.options ?? [],
+    limits: c.limits,
+    // Present when the network connects by signing in; the callback path is what you register with the network.
+    oauth: c.oauth ? { callback_path: `/oauth/${c.id}/callback`, scopes: c.oauth.scopes } : null,
+  };
 }
 
 export type { Connector } from "./types";

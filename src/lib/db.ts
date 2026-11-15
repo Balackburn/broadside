@@ -69,6 +69,12 @@ CREATE TABLE IF NOT EXISTS media (
   source_url TEXT,
   created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS oauth_pending (
+  state TEXT PRIMARY KEY,
+  platform TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  expires_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS api_keys (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,

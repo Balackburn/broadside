@@ -6,7 +6,6 @@ import { NetworkLogo } from "@/components/logos";
 import { NetworkRules } from "@/components/network-rules";
 import { HeroRing } from "@/components/hero-ring";
 import { Icon, Mark, Wordmark } from "@/components/ui";
-import { FlipText } from "@/components/vendor/obsidian-flip-text";
 import { connectors } from "@/lib/platforms";
 
 export const metadata: Metadata = { alternates: { canonical: "/" } };
@@ -87,10 +86,8 @@ export default function Home() {
                 Open source under the MIT licence
                 <Icon name="out" size={14} />
               </a>
-              <h1 className="display mt-8 text-[clamp(3.5rem,8vw,6.75rem)]">
-                <FlipText duration={0.9} delay={0.15} loop={false}>
-                  One post for every network
-                </FlipText>
+              <h1 className="display rise mt-8 text-[clamp(3.25rem,7.4vw,6rem)]" style={{ "--i": 1 } as React.CSSProperties}>
+                One post for every network
               </h1>
               <p className="rise mt-5 max-w-lg text-lg leading-relaxed text-ink-2" style={{ "--i": 2 } as React.CSSProperties}>
                 Write a post once. Broadside sends it to X, Bluesky, Threads, Mastodon, LinkedIn and {networks.length - 5} more, from your browser or from your AI agent.
@@ -104,10 +101,7 @@ export default function Home() {
                 </a>
               </div>
             </div>
-            <div className="relative">
-              <div className="halftone" />
-              <HeroRing />
-            </div>
+            <HeroRing />
           </div>
         </section>
 

@@ -18,7 +18,7 @@ const NETWORKS: Record<string, { name: string; handle: string }> = {
 const TEXT = "We shipped it. One post, written once, sent to every network we use.";
 
 /**
- * The hero object: one post as a printed sheet per network, on a turntable.
+ * The hero object: one post as a card per network, on a turntable.
  * It drifts round by itself, leans under the pointer, and can be swiped or
  * turned with the arrow keys.
  */
@@ -29,7 +29,7 @@ export function HeroRing() {
         spin={46}
         corner={16}
         render={(id) => (
-          <span className="paper ring-face">
+          <span className="ring-face">
             <span className="flex items-center gap-2">
               <Stamp platform={id} />
               <span className="min-w-0">
