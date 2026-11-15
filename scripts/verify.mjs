@@ -113,6 +113,10 @@ function networks() {
 
 /* Helpers ------------------------------------------------------------------ */
 
+// Long, distinctive stand-in secrets: a short one could collide with a random id and fail the leak check by chance.
+const SECRET_TOKEN = "verify-mastodon-access-token-7f3a";
+const SECRET_SIGNING = "verify-webhook-signing-secret-9c1e";
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function until(fn, label, timeout = 30000) {
@@ -195,17 +199,17 @@ try {
   };
   const ids = {
     sandbox: await connect("sandbox", { name: "Rehearsal" }),
-    mastodon: await connect("mastodon", { instance: net, access_token: "tok" }),
+    mastodon: await connect("mastodon", { instance: net, access_token: SECRET_TOKEN }),
     bluesky: await connect("bluesky", { identifier: "tester.test", app_password: "pw", service: net }),
     discord: await connect("discord", { webhook_url: `${net}/api/webhooks/1/token` }),
     telegram: await connect("telegram", { bot_token: "1:A", chat_id: "@chan", api_base: net }),
     slack: await connect("slack", { webhook_url: `${net}/slack`, channel: "#news" }),
-    webhook: await connect("webhook", { url: `${net}/hook`, name: "Automation", secret: "s3" }),
+    webhook: await connect("webhook", { url: `${net}/hook`, name: "Automation", secret: SECRET_SIGNING }),
   };
   const bad = await api("/api/v1/accounts", { method: "POST", headers: auth, body: JSON.stringify({ platform: "mastodon", credentials: { instance: net } }) });
   ok(bad.status === 400 && /Access token is required/.test(bad.body.error.message), "A missing credential is refused with the reason");
   const listed = await api("/api/v1/accounts", { headers: auth });
-  ok(!JSON.stringify(listed.body).includes('"tok"') && !JSON.stringify(listed.body).includes("s3"), "Account listings never contain credentials");
+  ok(listed.body.data.length === 7 && !JSON.stringify(listed.body).includes(SECRET_TOKEN) && !JSON.stringify(listed.body).includes(SECRET_SIGNING), "Account listings never contain credentials");
 
   // MCP over Streamable HTTP, with the official client
   const client = new Client({ name: "verify", version: "1.0.0" });
