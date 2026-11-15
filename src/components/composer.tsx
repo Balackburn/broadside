@@ -65,6 +65,7 @@ export function Composer({ accounts, initial }: { accounts: ComposerAccount[]; i
   const chosen = accounts.filter((a) => selected.includes(a.id));
   const shapes = useMemo(() => media.map((m) => ({ type: m.type, hasPublicUrl: Boolean(m.public_url) })), [media]);
   // An untouched composer is not an error: problems appear once there is something to measure.
+  const [freshPart, setFreshPart] = useState<number | null>(null);
   const parts = useMemo(() => thread.map((part) => part.text), [thread]);
   const pristine = !text.trim() && media.length === 0 && Object.keys(overrides).length === 0 && parts.every((part) => !part.trim());
   const issues = useMemo(
@@ -286,10 +287,20 @@ export function Composer({ accounts, initial }: { accounts: ComposerAccount[]; i
                 value={part.text}
                 onChange={(e) => setThread((all) => all.map((x) => (x.key === part.key ? { ...x, text: e.target.value } : x)))}
                 placeholder="Goes out as a reply to the part above."
+                autoFocus={part.key === freshPart}
               />
             </div>
           ))}
-          <button type="button" className="btn btn-quiet btn-sm" onClick={() => setThread((all) => [...all, { key: (all.at(-1)?.key ?? -1) + 1, text: "" }])}>
+          <button
+            type="button"
+            className="btn btn-quiet btn-sm"
+            onClick={() => {
+              // The new part takes the cursor, so typing continues in it rather than in the part above.
+              const key = (thread.at(-1)?.key ?? -1) + 1;
+              setFreshPart(key);
+              setThread((all) => [...all, { key, text: "" }]);
+            }}
+          >
             <Icon name="plus" size={16} /> Add to thread
           </button>
           {thread.length === 0 ? <span className="note ml-3">Add a first comment or a full thread.</span> : null}
