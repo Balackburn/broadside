@@ -1,8 +1,10 @@
+import { serverSecret } from "./crypto";
+
 /**
  * Optional password for the web app. With BROADSIDE_PASSWORD unset the app
  * answers on localhost only (see hosts.ts). A session is a signed expiry
  * time: it stops working after 30 days, when the password changes, or when
- * BROADSIDE_SECRET changes. Web Crypto only, so the proxy can run it too.
+ * the server secret changes (BROADSIDE_SECRET, else the install's key file).
  *
  * Once the install has members, the cookie names one: "m1.<member>.<expiry>.<proof>".
  * This file only makes and checks that value from key material it is handed;
@@ -17,8 +19,9 @@ const encoder = new TextEncoder();
 const hex = (bytes: ArrayBuffer) => [...new Uint8Array(bytes)].map((b) => b.toString(16).padStart(2, "0")).join("");
 
 async function sign(message: string): Promise<string> {
-  // Keyed by the password and the server secret together, so a leaked cookie is no shortcut to the password.
-  const material = encoder.encode(`${process.env.BROADSIDE_PASSWORD}\u0000${process.env.BROADSIDE_SECRET ?? process.env.BROADSIDE_SESSION_SECRET ?? ""}`);
+  // Keyed by the password and the server secret together, so a captured cookie is no way to guess the password offline.
+  // The secret is the one members' cookies use: BROADSIDE_SECRET, else the install's key file. It is never empty.
+  const material = encoder.encode(`${process.env.BROADSIDE_PASSWORD}\u0000${serverSecret()}`);
   const key = await crypto.subtle.importKey("raw", await crypto.subtle.digest("SHA-256", material), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
   return hex(await crypto.subtle.sign("HMAC", key, encoder.encode(message)));
 }

@@ -338,6 +338,46 @@ describe("who may use the app without a key", () => {
     expect(await signedIn(withCookie(value))).toBe(false);
     delete process.env.BROADSIDE_PASSWORD;
   });
+
+  it("signs the single-user session with a server secret that is never empty", async () => {
+    const withCookie = (v: string) => new Request("http://x/", { headers: { cookie: `${SESSION_COOKIE}=${v}` } });
+    /** A cookie made the way sign() made one before: the password, a zero byte, then whatever the secret was. */
+    const signedWith = async (password: string, secret: string) => {
+      const encoder = new TextEncoder();
+      const expires = Math.floor(Date.now() / 1000) + 30 * 24 * 3600;
+      const key = await crypto.subtle.importKey("raw", await crypto.subtle.digest("SHA-256", encoder.encode(`${password}\u0000${secret}`)), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+      const proof = Buffer.from(await crypto.subtle.sign("HMAC", key, encoder.encode(`session:${expires}`))).toString("hex");
+      return `${expires}.${proof}`;
+    };
+    process.env.BROADSIDE_PASSWORD = "correct horse";
+
+    // With BROADSIDE_SECRET set the key is derived exactly as before, so sessions from before this change carry on.
+    expect(await signedIn(withCookie(await signedWith("correct horse", "test-secret")))).toBe(true);
+    // The old derivation with nothing for a secret opened the way to guessing the password offline. It is refused.
+    expect(await signedIn(withCookie(await signedWith("correct horse", "")))).toBe(false);
+
+    // With no BROADSIDE_SECRET the install's key file is the secret, not an empty string.
+    delete process.env.BROADSIDE_SECRET;
+    delete process.env.BROADSIDE_SESSION_SECRET;
+    try {
+      const { installSecret } = await import("@/lib/crypto");
+      expect(installSecret()).toMatch(/^[0-9a-f]{64}$/);
+      expect(await signedIn(withCookie(await signedWith("correct horse", "")))).toBe(false);
+      const fresh = await sessionValue();
+      expect(await signedIn(withCookie(fresh))).toBe(true);
+      expect(fresh).toBe(await signedWith("correct horse", installSecret()));
+      // A new password still ends every session, and so does a new secret.
+      process.env.BROADSIDE_PASSWORD = "changed";
+      expect(await signedIn(withCookie(fresh))).toBe(false);
+      process.env.BROADSIDE_PASSWORD = "correct horse";
+      expect(await signedIn(withCookie(fresh))).toBe(true);
+      process.env.BROADSIDE_SECRET = "test-secret";
+      expect(await signedIn(withCookie(fresh))).toBe(false);
+    } finally {
+      process.env.BROADSIDE_SECRET = "test-secret";
+      delete process.env.BROADSIDE_PASSWORD;
+    }
+  });
 });
 
 describe("scheduling", () => {
