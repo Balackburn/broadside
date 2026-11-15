@@ -291,7 +291,7 @@ export const listmonk: Connector = {
     "In Listmonk open Admin, Users and create an API user with a role that may manage campaigns, get lists and upload media. Copy its token.",
     "Paste the address of your Listmonk, that user's name and its token, and the lists to send to.",
     "A post becomes a campaign and is sent to those lists at once. The first line is the email's subject and the rest is the email.",
-    "To look before anything is sent, set the option Campaign to draft: the campaign is made in Listmonk and waits there.",
+    "The composer has no switch for a draft. Through the API or an agent, a target with the option status set to draft makes the campaign in Listmonk and sends nothing.",
   ],
   fields: [
     { key: "url", label: "Listmonk address", kind: "url", placeholder: "https://newsletter.example.com" },
