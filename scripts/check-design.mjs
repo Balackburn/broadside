@@ -32,7 +32,7 @@ for (const file of files) {
     if (/\bease-in\b(?!-out)/.test(line)) fail(file, n, "ease-in makes an interface feel slow; use an ease-out token");
     if (/scale\(0\)/.test(line)) fail(file, n, "nothing enters from scale(0)");
     const literal = /#[0-9a-fA-F]{3,8}\b|\b(?:oklch|rgb|rgba|hsl|hsla)\(/.test(line);
-    const exempt = file.endsWith("layout.tsx") || (isTokens && (i < tokensEnd || /oklch\(0\.19 0\.012 262 \/ 0\.14\)/.test(line)));
+    const exempt = file.endsWith("layout.tsx") || file.endsWith("opengraph-image.tsx") || (isTokens && i < tokensEnd);
     if (literal && !exempt && !/&#\d+;|href="#|href=\{`#/.test(line)) fail(file, n, "colour literal; use a token from globals.css");
     if (/font-family:\s*(?!var\()/.test(line) && !isTokens) fail(file, n, "font named outside the tokens");
     if (/tracking-(wide|wider|widest)|uppercase/.test(line)) fail(file, n, "no tracked capitals for labels");

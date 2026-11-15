@@ -21,7 +21,7 @@ export function Fan({
   children?: React.ReactNode;
 }) {
   const [text, setText] = useState(
-    "We just shipped something. One post, sent everywhere at once, and every network gets a copy that fits. https://example.com #launch",
+    "We just shipped something. One post, sent everywhere at once, and every network gets a copy that fits. #launch",
   );
   const shown = networks.slice(0, 5);
 
@@ -47,34 +47,9 @@ export function Fan({
         </div>
       </div>
 
-      <div
-        className="fan max-lg:hidden"
-        aria-label="The post as each network would receive it"
-      >
+      <div className="fan" aria-label="The post as each network would receive it">
         {shown.map((network, n) => (
-          <Sheet
-            key={network.id}
-            network={network}
-            text={text}
-            style={
-              {
-                "--turn": TURNS[n],
-                "--n": n,
-                zIndex: n + 1,
-              } as React.CSSProperties
-            }
-            className="fan-sheet"
-          />
-        ))}
-      </div>
-      <div className="flex snap-x gap-3 overflow-x-auto pb-2 lg:hidden">
-        {shown.map((network) => (
-          <Sheet
-            key={network.id}
-            network={network}
-            text={text}
-            className="w-[78vw] max-w-80 flex-none snap-start"
-          />
+          <Sheet key={network.id} network={network} text={text} style={{ "--turn": TURNS[n], "--n": n, zIndex: n + 1 } as React.CSSProperties} className="fan-sheet" />
         ))}
       </div>
     </div>

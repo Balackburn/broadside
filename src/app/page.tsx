@@ -1,3 +1,4 @@
+import type { Metadata } from "next";
 import Link from "next/link";
 import { Fan } from "@/components/fan";
 import { Mark, Stamp, Wordmark } from "@/components/ui";
@@ -33,6 +34,8 @@ const SELF_HOST = `npm install
 npm run build
 npm start        # http://localhost:3000`;
 
+export const metadata: Metadata = { alternates: { canonical: "/" } };
+
 export default function Home() {
   const networks = connectors.filter((c) => c.id !== "sandbox");
   const fan = ["x", "bluesky", "mastodon", "threads", "linkedin"].map((id) => {
@@ -62,7 +65,7 @@ export default function Home() {
         </nav>
       </header>
 
-      <main>
+      <main id="content">
         <section className="page pt-10 pb-24 lg:pt-14">
           <h1 className="display rise text-[clamp(3.25rem,9.4vw,8.5rem)]">One post. Every network.</h1>
           <div className="mt-8">
@@ -195,13 +198,13 @@ export default function Home() {
             <Mark size={24} /> Broadside, MIT licensed
           </span>
           <nav className="flex gap-5" aria-label="Footer">
-            <Link className="link" href="/app">
+            <Link className="link inline-block py-2" href="/app">
               App
             </Link>
-            <Link className="link" href="/app/connect">
+            <Link className="link inline-block py-2" href="/app/connect">
               MCP and API
             </Link>
-            <a className="link" href="#networks">
+            <a className="link inline-block py-2" href="#networks">
               Networks
             </a>
           </nav>

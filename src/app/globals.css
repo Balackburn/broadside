@@ -1,4 +1,5 @@
-/* Broadside · custom direction: a printed sheet — paper, black ink, one spot red · poster grotesque over a plain text face */
+/* Hallmark · v2.0.0 · theme: custom (three dealt themes declined: none carried the printed-sheet idea) · genre: modern-minimal · signature: one post fanned into a sheet per network, live in the hero · paper, ink, one spot red · Bricolage Grotesque over Geist */
+/* critique: the fan carries the first screen; below it the page leans on type and tone fields with no photographs, by choice (no honest picture of this product exists but its own interface) */
 @import "tailwindcss";
 
 :root {
@@ -13,7 +14,8 @@
   --line-strong: oklch(0.19 0.012 262 / 0.24);
   --signal: oklch(0.6 0.235 27);
   --signal-press: oklch(0.54 0.225 27);
-  --on-signal: oklch(0.99 0 0);
+  --on-signal: oklch(0.99 0.005 27);
+  --pill-shadow: 0 1px 2px oklch(0.19 0.012 262 / 0.14);
   --good: oklch(0.52 0.14 150);
   --bad: oklch(0.55 0.22 25);
   --scrim: oklch(0.19 0.012 262 / 0.42);
@@ -194,7 +196,7 @@
   .btn-bare {
     background: transparent;
     color: var(--ink-2);
-    padding: 0 10px;
+    padding: 0 12px;
     min-height: 36px;
   }
   .btn-lg {
@@ -210,6 +212,13 @@
   @media (hover: hover) and (pointer: fine) {
     .btn-signal:hover:not(:disabled) {
       background: var(--signal-press);
+    }
+    /* Large actions lift like a sheet picked off the stack; small controls only change tone. */
+    .btn-lg:hover:not(:disabled) {
+      transform: translateY(-2px);
+    }
+    .btn-lg:active:not(:disabled) {
+      transform: scale(0.97);
     }
     .btn-quiet:hover:not(:disabled) {
       background: var(--paper-3);
@@ -240,7 +249,6 @@
     box-shadow: inset 0 0 0 1px var(--line-strong);
     color: var(--ink);
     font: inherit;
-    transition: box-shadow var(--duration-quick) ease;
   }
   .field::placeholder {
     color: var(--ink-3);
@@ -254,7 +262,7 @@
   }
   .label {
     display: block;
-    margin-bottom: 6px;
+    margin-bottom: 8px;
     font-size: 14px;
     font-weight: 550;
   }
@@ -344,21 +352,21 @@
   .tabs {
     position: relative;
     display: inline-flex;
-    padding: 3px;
+    padding: 4px;
     border-radius: var(--r-1);
     background: var(--paper-2);
   }
   .tabs-pill {
     position: absolute;
-    top: 3px;
+    top: 4px;
     left: 0;
-    height: calc(100% - 6px);
+    height: calc(100% - 8px);
     border-radius: 4px;
     background: var(--paper);
-    box-shadow: 0 1px 2px oklch(0.19 0.012 262 / 0.14);
-    transition:
-      transform var(--duration-fast) var(--ease-smooth-out),
-      width var(--duration-fast) var(--ease-smooth-out);
+    box-shadow: var(--pill-shadow);
+    width: 100px;
+    transform-origin: left center;
+    transition: transform var(--duration-fast) var(--ease-smooth-out);
   }
   .tab {
     position: relative;
@@ -370,7 +378,12 @@
     font-weight: 500;
     color: var(--ink-2);
     cursor: pointer;
-    transition: color var(--duration-quick) ease;
+    transition:
+      color var(--duration-quick) ease,
+      transform var(--duration-quick) var(--ease-out);
+  }
+  .tab:active {
+    transform: scale(0.97);
   }
   .tab[aria-selected="true"] {
     color: var(--ink);
@@ -380,7 +393,7 @@
   .status {
     display: inline-flex;
     align-items: center;
-    gap: 6px;
+    gap: 8px;
     font-size: 14px;
     font-weight: 550;
     white-space: nowrap;
@@ -402,7 +415,7 @@
   /* Dialog (transitions.dev: modal). Scales from centre; closes faster than it opens. */
   .dialog {
     margin: auto;
-    width: min(560px, calc(100vw - 32px));
+    width: min(560px, 100% - 32px);
     max-height: calc(100dvh - 48px);
     overflow: auto;
     padding: 24px;
@@ -448,7 +461,7 @@
     left: 50%;
     bottom: 24px;
     z-index: 60;
-    max-width: min(520px, calc(100vw - 32px));
+    max-width: min(520px, 100% - 32px);
     padding: 12px 16px;
     border-radius: var(--r-2);
     background: var(--ink);
@@ -472,7 +485,7 @@
 
   /* Error shake (transitions.dev: error state shake). */
   .is-shaking {
-    animation: shake 320ms var(--ease-out);
+    animation: shake 300ms var(--ease-out);
   }
   @keyframes shake {
     20% {
@@ -493,7 +506,7 @@
   .check path {
     stroke-dasharray: 16;
     stroke-dashoffset: 16;
-    animation: draw var(--duration-slow) var(--ease-smooth-out) forwards;
+    animation: draw 300ms var(--ease-smooth-out) forwards;
   }
   @keyframes draw {
     to {
@@ -532,7 +545,7 @@
   /* Entrances: parts of a section rise in turn. Content is visible without script. */
   .rise {
     animation: rise var(--duration-very-slow) var(--ease-smooth-out) both;
-    animation-delay: calc(var(--i, 0) * 70ms);
+    animation-delay: calc(var(--i, 0) * 50ms);
   }
   @keyframes rise {
     from {
@@ -548,22 +561,40 @@
     }
   }
 
-  /* The fan: the hero's sheets spread from one pivot, like a hand of printed bills. */
+  /* The fan: the hero's sheets spread from one pivot, like a hand of printed bills.
+     On a narrow screen the same sheets sit in a row to swipe through. */
   .fan {
-    position: relative;
-    height: 400px;
-    margin-top: 8px;
+    display: flex;
+    gap: 12px;
+    overflow-x: auto;
+    scroll-snap-type: x mandatory;
+    padding-bottom: 8px;
   }
   .fan-sheet {
-    position: absolute;
-    inset: 0 auto auto 50%;
-    width: 300px;
-    margin-left: -150px;
-    transform-origin: 50% 230%;
-    transform: rotate(calc(var(--turn) * 1deg)) translateY(calc(var(--lift, 0) * 1px));
-    transition: transform var(--duration-very-slow) var(--ease-smooth-out);
-    animation: deal var(--duration-very-slow) var(--ease-smooth-out) both;
-    animation-delay: calc(var(--n) * 90ms + 200ms);
+    flex: none;
+    width: min(78vw, 320px);
+    scroll-snap-align: start;
+  }
+  @media (min-width: 1024px) {
+    .fan {
+      display: block;
+      position: relative;
+      height: 400px;
+      margin-top: 8px;
+      overflow: visible;
+      padding-bottom: 0;
+    }
+    .fan-sheet {
+      position: absolute;
+      inset: 0 auto auto 50%;
+      width: 304px;
+      margin-left: -152px;
+      transform-origin: 50% 230%;
+      transform: rotate(calc(var(--turn) * 1deg)) translateY(calc(var(--lift, 0) * 1px));
+      transition: transform var(--duration-fast) var(--ease-smooth-out);
+      animation: deal var(--duration-very-slow) var(--ease-smooth-out) both;
+      animation-delay: calc(var(--n) * 50ms + 200ms);
+    }
   }
   @keyframes deal {
     from {
@@ -571,7 +602,7 @@
       transform: rotate(0deg) translateY(24px);
     }
   }
-  @media (hover: hover) and (pointer: fine) {
+  @media (hover: hover) and (pointer: fine) and (min-width: 1024px) {
     .fan-sheet:hover {
       --lift: -18;
       z-index: 5;
@@ -603,7 +634,7 @@
   .rail-link {
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: 12px;
     min-height: 40px;
     padding: 0 12px;
     border-radius: var(--r-1);
@@ -612,7 +643,11 @@
     color: var(--ink-2);
     transition:
       background-color var(--duration-quick) ease,
-      color var(--duration-quick) ease;
+      color var(--duration-quick) ease,
+      transform var(--duration-quick) var(--ease-out);
+  }
+  .rail-link:active {
+    transform: scale(0.98);
   }
   .rail-link[aria-current="page"] {
     background: var(--ink);
@@ -626,7 +661,28 @@
   }
 
   .row {
-    transition: background-color var(--duration-quick) ease;
+    transition:
+      background-color var(--duration-quick) ease,
+      transform var(--duration-quick) var(--ease-out);
+  }
+  .row:active {
+    transform: scale(0.995);
+  }
+
+  /* Skip link: first stop for a keyboard, invisible until focused. */
+  .skip {
+    position: absolute;
+    left: 12px;
+    top: 12px;
+    z-index: 70;
+    padding: 8px 12px;
+    border-radius: var(--r-1);
+    background: var(--ink);
+    color: var(--paper);
+    transform: translateY(-200%);
+  }
+  .skip:focus-visible {
+    transform: none;
   }
   @media (hover: hover) and (pointer: fine) {
     .row:hover {

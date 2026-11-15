@@ -127,8 +127,8 @@ export function Tabs<T extends string>({ value, onChange, options, label }: { va
     const el = pill.current;
     // The first placement must not animate, or the pill slides in from the corner.
     if (!placed.current) el.style.transition = "none";
-    el.style.width = `${active.offsetWidth}px`;
-    el.style.transform = `translateX(${active.offsetLeft}px)`;
+    // Width is tweened as a horizontal scale of a 100px pill, so only transform animates.
+    el.style.transform = `translateX(${active.offsetLeft}px) scaleX(${active.offsetWidth / 100})`;
     if (!placed.current) {
       void el.offsetWidth;
       el.style.transition = "";
