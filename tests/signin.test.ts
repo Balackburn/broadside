@@ -88,10 +88,12 @@ describe("every network that signs in", () => {
     pinterest: { app_id: "pid", app_secret: "app-secret-pin" },
     tiktok: { client_key: "ck", client_secret: "app-secret-tt" },
     tumblr: { consumer_key: "tk", consumer_secret: "app-secret-tm" },
+    twitch: { client_id: "twid", client_secret: "app-secret-tw" },
+    kick: { client_id: "kid", client_secret: "app-secret-kk" },
   };
   const signingIn = connectors.filter((c) => c.oauth);
 
-  it("is the nine that have a developer app", () => {
+  it("is the eleven that have a developer app", () => {
     expect(signingIn.map((c) => c.id).sort()).toEqual(Object.keys(apps).sort());
   });
 
@@ -878,5 +880,136 @@ describe("Tumblr", () => {
     expect(account.handle).toBe("typeshop.tumblr.com");
     expect(credentialsOf(account.id)).toMatchObject({ blog: "typeshop" });
     expect(connector("tumblr")!.oauth!.paste.required).toEqual(["consumer_key", "consumer_secret", "refresh_token", "blog"]);
+  });
+});
+
+/* Twitch ------------------------------------------------------------------- */
+
+describe("Twitch", () => {
+  const app = { client_id: "twid", client_secret: "twitch-app-secret" };
+  let issued = 0;
+  let sent = 0;
+  const twitchNet = (overrides: (call: Call) => unknown = () => undefined) =>
+    network((call) => {
+      const special = overrides(call);
+      if (special !== undefined) return special;
+      if (call.path === "https://id.twitch.tv/oauth2/token") {
+        issued++;
+        return { access_token: `twa-${issued}`, refresh_token: `twr-${issued}`, expires_in: 14000, scope: ["user:write:chat"], token_type: "bearer" };
+      }
+      if (call.path === "https://api.twitch.tv/helix/users") {
+        return call.query.login ? { data: [{ id: "900", login: call.query.login, display_name: "Other" }] } : { data: [{ id: "141", login: "printer", display_name: "Printer", profile_image_url: "https://static.example/p.png" }] };
+      }
+      return { data: [{ message_id: `msg-${++sent}`, is_sent: true, drop_reason: null }] };
+    });
+
+  it("sends the browser to Twitch for the one scope that writes chat as you", () => {
+    const { address, params } = begin("twitch", app);
+    expect(address).toBe("https://id.twitch.tv/oauth2/authorize");
+    expect(params).toEqual({ client_id: "twid", response_type: "code", scope: "user:write:chat", redirect_uri: "http://localhost:3000/oauth/twitch/callback", state: STATE });
+  });
+
+  it("exchanges the code, learns who signed in and which channel was named, and sends a thread as replies in its chat", async () => {
+    const net = twitchNet();
+    const account = await anAccount(finishOAuth("twitch", begin("twitch", { ...app, channel: "OtherChannel" }).state, "tw-code", net.fetcher));
+    expect(net.calls[0]).toMatchObject({ url: "https://id.twitch.tv/oauth2/token", method: "POST", auth: null });
+    expect(net.calls[0].body).toEqual({ client_id: "twid", client_secret: "twitch-app-secret", code: "tw-code", grant_type: "authorization_code", redirect_uri: "http://localhost:3000/oauth/twitch/callback" });
+    expect(net.calls[1]).toMatchObject({ url: "https://api.twitch.tv/helix/users", auth: expect.stringMatching(/^Bearer twa-/) });
+    expect(net.calls[2]).toMatchObject({ url: "https://api.twitch.tv/helix/users?login=otherchannel" });
+    expect(account.handle).toBe("Printer in otherchannel's chat");
+    expect(credentialsOf(account.id)).toMatchObject({ client_id: "twid", client_secret: "twitch-app-secret", sender_id: "141", broadcaster_id: "900", channel: "otherchannel" });
+
+    expire(account.id);
+    const spent = credentialsOf(account.id).refresh_token;
+    const from = net.calls.length;
+    const post = await createPost({ content: "Live in ten minutes", thread: ["Bring questions"], targets: [{ account_id: account.id }] }, net.fetcher);
+    expect(post.status).toBe("published");
+    const out = net.calls.slice(from);
+    expect(out[0].body).toEqual({ client_id: "twid", client_secret: "twitch-app-secret", grant_type: "refresh_token", refresh_token: spent });
+    const stored = credentialsOf(account.id);
+    expect(out[1]).toMatchObject({ url: "https://api.twitch.tv/helix/chat/messages", method: "POST", auth: `Bearer ${stored.access_token}` });
+    expect(out[1].body).toEqual({ broadcaster_id: "900", sender_id: "141", message: "Live in ten minutes" });
+    const first = post.targets[0].parts[0].id;
+    expect(out[2].body).toEqual({ broadcaster_id: "900", sender_id: "141", message: "Bring questions", reply_parent_message_id: first });
+    expect(out).toHaveLength(3);
+    expect(stored.refresh_token).not.toBe(spent);
+  });
+
+  it("reports Twitch's own reason when the code is refused, and still connects with a pasted refresh token", async () => {
+    const badCode = twitchNet((call) => (call.path.endsWith("/oauth2/token") ? refused({ status: 400, message: "Invalid authorization code" }) : undefined));
+    await expect(finishOAuth("twitch", begin("twitch", app).state, "bad", badCode.fetcher)).rejects.toThrow("Twitch did not complete the sign-in: Invalid authorization code.");
+    const net = twitchNet();
+    const account = await connectAccount("twitch", { ...app, refresh_token: "tw-pasted-refresh" }, net.fetcher);
+    expect(net.calls[0].body).toEqual({ client_id: "twid", client_secret: "twitch-app-secret", grant_type: "refresh_token", refresh_token: "tw-pasted-refresh" });
+    expect(account.handle).toBe("Printer");
+    expect(credentialsOf(account.id)).toMatchObject({ sender_id: "141", broadcaster_id: "141", channel: "printer" });
+    expect(describeNetwork(connector("twitch")!).oauth!.paste.map((f) => [f.key, f.optional])).toEqual([["client_id", false], ["client_secret", false], ["refresh_token", false], ["channel", true]]);
+  });
+});
+
+/* Kick --------------------------------------------------------------------- */
+
+describe("Kick", () => {
+  const app = { client_id: "kid", client_secret: "kick-app-secret" };
+  let issued = 0;
+  const kickNet = (overrides: (call: Call) => unknown = () => undefined) =>
+    network((call) => {
+      const special = overrides(call);
+      if (special !== undefined) return special;
+      if (call.path === "https://id.kick.com/oauth/token") {
+        issued++;
+        return { access_token: `kka-${issued}`, token_type: "Bearer", refresh_token: `kkr-${issued}`, expires_in: 7200, scope: "user:read chat:write" };
+      }
+      if (call.path === "https://api.kick.com/public/v1/users") return { data: [{ user_id: 55, name: "printer", email: "", profile_picture: "" }], message: "OK" };
+      return { data: { is_sent: true, message_id: "5f0c1a52-7c1e-4a0b-9d59-2d1b7a9d0c11" }, message: "OK" };
+    });
+
+  it("sends the browser to Kick with PKCE, and localhost in place of 127.0.0.1", () => {
+    const { address, params } = begin("kick", app, "http://127.0.0.1:3000");
+    expect(address).toBe("https://id.kick.com/oauth/authorize");
+    expect(params).toEqual({
+      client_id: "kid",
+      response_type: "code",
+      scope: "user:read chat:write",
+      redirect_uri: "http://localhost:3000/oauth/kick/callback",
+      state: STATE,
+      code_challenge: expect.stringMatching(/^[\w-]{43}$/),
+      code_challenge_method: "S256",
+    });
+  });
+
+  it("exchanges the code with the verifier behind the challenge, then chats as the one who signed in", async () => {
+    const net = kickNet();
+    const started = begin("kick", app);
+    const account = await anAccount(finishOAuth("kick", started.state, "kick-code", net.fetcher));
+    const exchange = net.calls[0].body as Record<string, string>;
+    expect(net.calls[0]).toMatchObject({ url: "https://id.kick.com/oauth/token", method: "POST", auth: null });
+    expect(exchange).toMatchObject({ client_id: "kid", client_secret: "kick-app-secret", code: "kick-code", grant_type: "authorization_code", redirect_uri: "http://localhost:3000/oauth/kick/callback" });
+    expect(createHash("sha256").update(exchange.code_verifier).digest("base64url")).toBe(started.params.code_challenge);
+    expect(net.calls[1]).toMatchObject({ url: "https://api.kick.com/public/v1/users", auth: expect.stringMatching(/^Bearer kka-/) });
+    expect(account.handle).toBe("printer");
+    expect(credentialsOf(account.id)).toMatchObject({ client_id: "kid", client_secret: "kick-app-secret", user_id: "55" });
+
+    expire(account.id);
+    const spent = credentialsOf(account.id).refresh_token;
+    const from = net.calls.length;
+    const post = await createPost({ content: "Live now", targets: [{ account_id: account.id }] }, net.fetcher);
+    expect(post.status).toBe("published");
+    const out = net.calls.slice(from);
+    expect(out[0].body).toEqual({ client_id: "kid", client_secret: "kick-app-secret", grant_type: "refresh_token", refresh_token: spent });
+    const stored = credentialsOf(account.id);
+    expect(out[1]).toMatchObject({ url: "https://api.kick.com/public/v1/chat", method: "POST", auth: `Bearer ${stored.access_token}` });
+    expect(out[1].body).toEqual({ broadcaster_user_id: 55, content: "Live now", type: "user" });
+    expect(stored.refresh_token).toMatch(/^kkr-/);
+    expect(stored.refresh_token).not.toBe(spent);
+  });
+
+  it("reports Kick's own reason when the code is refused, and still connects with a pasted refresh token", async () => {
+    const badCode = kickNet((call) => (call.path.endsWith("/oauth/token") ? refused({ error: "Invalid request" }) : undefined));
+    await expect(finishOAuth("kick", begin("kick", app).state, "bad", badCode.fetcher)).rejects.toThrow("Kick did not complete the sign-in: Invalid request.");
+    const net = kickNet();
+    const account = await connectAccount("kick", { ...app, refresh_token: "kk-pasted-refresh" }, net.fetcher);
+    expect(net.calls[0].body).toEqual({ client_id: "kid", client_secret: "kick-app-secret", grant_type: "refresh_token", refresh_token: "kk-pasted-refresh" });
+    expect(account.handle).toBe("printer");
   });
 });

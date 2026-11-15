@@ -445,7 +445,7 @@ describe("Discord metrics", () => {
 describe("networks with no numbers to read", () => {
   it("have no metrics method at all, and say why in a sentence", () => {
     const reasons = Object.fromEntries(connectors.filter((c) => !c.metrics).map((c) => [c.id, c.noMetrics]));
-    expect(Object.keys(reasons).sort()).toEqual(["ghost", "linkedin", "nostr", "sandbox", "slack", "telegram", "tumblr", "webhook", "wordpress"]);
+    expect(Object.keys(reasons).sort()).toEqual(["ghost", "kick", "linkedin", "nostr", "sandbox", "slack", "telegram", "tumblr", "twitch", "webhook", "wordpress"]);
     expect(reasons.linkedin).toBe("LinkedIn gives post statistics only to apps it has approved for its Community Management API. An app with Share on LinkedIn alone cannot read them.");
     expect(reasons.nostr).toMatch(/^Nostr keeps no count for a note\./);
     expect(reasons.sandbox).toBe("The sandbox publishes nowhere, so there is nothing to count.");

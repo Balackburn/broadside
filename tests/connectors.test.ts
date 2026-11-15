@@ -54,7 +54,7 @@ const part = (text: string, root: PartRef, parent?: PartRef, options: Record<str
 describe("registry", () => {
   it("lists every network once, each with setup steps and fields", () => {
     expect(new Set(connectors.map((c) => c.id)).size).toBe(connectors.length);
-    expect(connectors.length).toBe(23);
+    expect(connectors.length).toBe(25);
     for (const c of connectors) {
       expect(c.setup.length, c.id).toBeGreaterThan(0);
       expect(c.fields.length, c.id).toBeGreaterThan(0);
@@ -382,7 +382,7 @@ describe("errors", () => {
 
 describe("threads: which networks take one", () => {
   it("offers reply on the networks that can thread or comment, and names the ones that cannot", () => {
-    expect(connectors.filter((c) => c.reply).map((c) => c.id)).toEqual(["x", "bluesky", "threads", "mastodon", "linkedin", "instagram", "facebook", "reddit", "telegram", "nostr", "lemmy", "sandbox"]);
+    expect(connectors.filter((c) => c.reply).map((c) => c.id)).toEqual(["x", "bluesky", "threads", "mastodon", "linkedin", "instagram", "facebook", "reddit", "telegram", "twitch", "kick", "nostr", "lemmy", "sandbox"]);
     expect(threadProblems(fits(get("discord")), ["a comment"])).toEqual(["Discord cannot post a thread from a webhook."]);
     expect(threadProblems(fits(get("slack")), ["a comment"])).toEqual(["Slack cannot post a thread from an incoming webhook."]);
     for (const id of ["tiktok", "youtube", "pinterest", "devto", "webhook"]) expect(threadProblems(fits(get(id)), ["a comment"]), id).toEqual([`${get(id).name} cannot post a thread.`]);
@@ -997,5 +997,148 @@ describe("Tumblr", () => {
     expect(expired.message).toBe("Tumblr would not renew the sign-in: Refresh token has expired. Reconnect the account.");
     expect(expired.reconnect).toBe(true);
     for (const thrown of [invalid, unauthorized, slow, expired]) expect(leaks(thrown, app.consumer_key, app.consumer_secret, signedIn.access_token, signedIn.refresh_token, "tumblr-refresh-spent-77")).toBe(false);
+  });
+});
+
+describe("chat: Twitch", () => {
+  const app = { client_id: "twitch-client-4c1a", client_secret: "twitch-secret-e7b9" };
+  const live = { ...app, access_token: "twitch-access-0d3f", refresh_token: "twitch-refresh-6a52", expires_at: new Date(Date.now() + 3 * 3600_000).toISOString() };
+  const connected = { ...live, sender_id: "141981764", broadcaster_id: "12826", channel: "somechannel" };
+  const headers = { authorization: "Bearer twitch-access-0d3f", "client-id": "twitch-client-4c1a" };
+  const ada = { id: "141981764", login: "ada", display_name: "Ada", profile_image_url: "https://static.example/ada.png" };
+
+  it("asks who signed in, and uses their own channel when none is named", async () => {
+    const { fetcher, calls } = fake(() => ({ data: [ada] }));
+    const profile = await get("twitch").verify(live, { fetch: fetcher });
+    expect(profile).toEqual({ handle: "Ada", avatarUrl: "https://static.example/ada.png", credentials: { sender_id: "141981764", broadcaster_id: "141981764", channel: "ada" } });
+    expect(calls).toEqual([{ url: "https://api.twitch.tv/helix/users", method: "GET", headers, body: undefined }]);
+  });
+
+  it("looks up another channel by its login name, and refuses one that does not exist", async () => {
+    const { fetcher, calls } = fake(({ url }) => (url.includes("login=somechannel") ? { data: [{ id: "12826", login: "somechannel", display_name: "SomeChannel" }] } : url.includes("login=") ? { data: [] } : { data: [ada] }));
+    const profile = await get("twitch").verify({ ...live, channel: "#SomeChannel" }, { fetch: fetcher });
+    expect(profile.handle).toBe("Ada in somechannel's chat");
+    expect(profile.credentials).toEqual({ sender_id: "141981764", broadcaster_id: "12826", channel: "somechannel" });
+    expect(calls[1].url).toBe("https://api.twitch.tv/helix/users?login=somechannel");
+    const missing = await get("twitch").verify({ ...live, channel: "nobody here" }, { fetch: fetcher }).catch((e) => e);
+    expect(missing.message).toBe('Twitch has no channel called "nobody here".');
+    expect(calls.at(-1)!.url).toBe("https://api.twitch.tv/helix/users?login=nobody%20here");
+  });
+
+  it("sends the post as one chat message", async () => {
+    const { fetcher, calls } = fake(() => ({ data: [{ message_id: "abc-123-def", is_sent: true, drop_reason: null }] }));
+    const result = await get("twitch").publish(post("Live in ten minutes"), connected, { fetch: fetcher });
+    expect(result).toEqual({ id: "abc-123-def" });
+    expect(calls).toEqual([
+      { url: "https://api.twitch.tv/helix/chat/messages", method: "POST", headers: { ...headers, "content-type": "application/json" }, body: { broadcaster_id: "12826", sender_id: "141981764", message: "Live in ten minutes" } },
+    ]);
+  });
+
+  it("sends a later part as a reply to the one before", async () => {
+    const { fetcher, calls } = fake(() => ({ data: [{ message_id: "second", is_sent: true }] }));
+    const result = await get("twitch").reply!(part("and one more thing", { id: "first" }, { id: "middle" }), connected, { fetch: fetcher });
+    expect(result).toEqual({ id: "second" });
+    expect(calls[0].body).toEqual({ broadcaster_id: "12826", sender_id: "141981764", message: "and one more thing", reply_parent_message_id: "middle" });
+  });
+
+  it("reports a message the chat's rules dropped, in Twitch's words", async () => {
+    const { fetcher } = fake(() => ({ data: [{ message_id: "", is_sent: false, drop_reason: { code: "followers_only_mode", message: "This room is in followers-only mode." } }] }));
+    const dropped = await get("twitch").publish(post("hello"), connected, { fetch: fetcher }).catch((e) => e);
+    expect(dropped).toBeInstanceOf(PublishError);
+    expect(dropped.message).toBe("Twitch did not send the message: This room is in followers-only mode.");
+    expect(dropped.retryable).toBe(false);
+  });
+
+  it("renews the sign-in when it has run out, then sends", async () => {
+    const { fetcher, calls } = fake(({ url }) => (url.endsWith("/oauth2/token") ? { access_token: "twitch-access-new", refresh_token: "twitch-refresh-new", expires_in: 15583, scope: ["user:write:chat"], token_type: "bearer" } : { data: [{ message_id: "m", is_sent: true }] }));
+    const result = await get("twitch").publish(post("hello"), { ...connected, access_token: "", expires_at: "" }, { fetch: fetcher });
+    expect(calls[0]).toEqual({
+      url: "https://id.twitch.tv/oauth2/token",
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: { client_id: "twitch-client-4c1a", client_secret: "twitch-secret-e7b9", grant_type: "refresh_token", refresh_token: "twitch-refresh-6a52" },
+    });
+    expect(calls[1].headers.authorization).toBe("Bearer twitch-access-new");
+    expect(result.credentials).toMatchObject({ access_token: "twitch-access-new", refresh_token: "twitch-refresh-new" });
+  });
+
+  it("holds a message to 500 characters and to text, and quotes a refusal without a secret", async () => {
+    expect(problems(get("twitch"), "a".repeat(501), [])).toEqual(["Twitch allows 500 characters; this is 501."]);
+    expect(problems(get("twitch"), "hi", [{ type: "image", hasPublicUrl: true }])).toEqual(["Twitch does not take images here."]);
+    expect(problems(get("twitch"), "hi", [{ type: "video", hasPublicUrl: true }])).toEqual(["Twitch does not take video here."]);
+    expect(threadProblems(fits(get("twitch")), ["a".repeat(501)])).toEqual(["Twitch allows 500 characters in a reply; part 2 is 501."]);
+    const denied = fake(() => Response.json({ error: "Unauthorized", status: 401, message: "The user access token must include the user:write:chat scope." }, { status: 401 }));
+    const refused = await get("twitch").publish(post("hello"), connected, { fetch: denied.fetcher }).catch((e) => e);
+    expect(refused.message).toBe("Twitch answered 401: The user access token must include the user:write:chat scope.");
+    const large = fake(() => Response.json({ error: "Unprocessable Entity", status: 422, message: "The message is too large." }, { status: 422 }));
+    expect((await get("twitch").publish(post("hello"), connected, { fetch: large.fetcher }).catch((e) => e)).message).toBe("Twitch answered 422: The message is too large.");
+    const unverified = await get("twitch").publish(post("hello"), live, { fetch: denied.fetcher }).catch((e) => e);
+    expect(unverified.message).toBe("This Twitch account was connected without its channel. Reconnect it.");
+    for (const thrown of [refused, unverified]) expect(leaks(thrown, app.client_secret, live.access_token, live.refresh_token)).toBe(false);
+  });
+});
+
+describe("chat: Kick", () => {
+  const app = { client_id: "kick-client-8f20", client_secret: "kick-secret-b4d6" };
+  const live = { ...app, access_token: "kick-access-71ce", refresh_token: "kick-refresh-2a9b", expires_at: new Date(Date.now() + 3600_000).toISOString() };
+  const connected = { ...live, user_id: "4321" };
+  const bearer = { authorization: "Bearer kick-access-71ce" };
+
+  it("asks who signed in", async () => {
+    const { fetcher, calls } = fake(() => ({ data: [{ user_id: 4321, name: "ada", email: "", profile_picture: "https://files.example/ada.webp" }], message: "OK" }));
+    const profile = await get("kick").verify(live, { fetch: fetcher });
+    expect(profile).toEqual({ handle: "ada", avatarUrl: "https://files.example/ada.webp", credentials: { user_id: "4321" } });
+    expect(calls).toEqual([{ url: "https://api.kick.com/public/v1/users", method: "GET", headers: bearer, body: undefined }]);
+    expect((await get("kick").verify({ ...live, broadcaster_user_id: "98765" }, { fetch: fetcher })).handle).toBe("ada in the chat of channel 98765");
+    const named = await get("kick").verify({ ...live, broadcaster_user_id: "somechannel" }, { fetch: fetcher }).catch((e) => e);
+    expect(named.message).toBe("The channel's user id is a number. Leave it empty to write in your own channel's chat.");
+    expect(calls).toHaveLength(2);
+  });
+
+  it("signs in with PKCE on the name Kick accepts for this machine", () => {
+    expect(get("kick").oauth).toMatchObject({ authorizeUrl: "https://id.kick.com/oauth/authorize", tokenUrl: "https://id.kick.com/oauth/token", scopes: ["user:read", "chat:write"], pkce: "S256", clientAuth: "body", loopback: "localhost" });
+  });
+
+  it("sends the post as a chat message from the user, in their own channel unless another is named", async () => {
+    const { fetcher, calls } = fake(() => ({ data: { is_sent: true, message_id: "0d4e5f6a-1b2c-4d3e-8f90-a1b2c3d4e5f6" }, message: "OK" }));
+    const result = await get("kick").publish(post("Live now"), connected, { fetch: fetcher });
+    expect(result).toEqual({ id: "0d4e5f6a-1b2c-4d3e-8f90-a1b2c3d4e5f6" });
+    expect(calls[0]).toEqual({ url: "https://api.kick.com/public/v1/chat", method: "POST", headers: { ...bearer, "content-type": "application/json" }, body: { broadcaster_user_id: 4321, content: "Live now", type: "user" } });
+    await get("kick").publish(post("Live now"), { ...connected, broadcaster_user_id: "98765" }, { fetch: fetcher });
+    expect(calls[1].body).toEqual({ broadcaster_user_id: 98765, content: "Live now", type: "user" });
+    await get("kick").reply!(part("more", { id: "root-id" }, { id: "parent-id" }), connected, { fetch: fetcher });
+    expect(calls[2].body).toEqual({ broadcaster_user_id: 4321, content: "more", type: "user", reply_to_message_id: "parent-id" });
+  });
+
+  it("holds a message to 500 characters and to 2,048 bytes", async () => {
+    expect(problems(get("kick"), "a".repeat(501), [])).toEqual(["Kick allows 500 characters; this is 501."]);
+    expect(problems(get("kick"), "hi", [{ type: "image", hasPublicUrl: true }])).toEqual(["Kick does not take images here."]);
+    const { fetcher, calls } = fake(() => ({ data: { is_sent: true, message_id: "x" } }));
+    // 100 family emoji are 100 characters and 1,800 bytes; 120 are 2,160 bytes.
+    await get("kick").publish(post("👨‍👨‍👦".repeat(100)), connected, { fetch: fetcher });
+    const heavy = await get("kick").publish(post("👨‍👨‍👦".repeat(120)), connected, { fetch: fetcher }).catch((e) => e);
+    expect(heavy).toBeInstanceOf(PublishError);
+    expect(heavy.message).toBe("Kick allows 2,048 bytes in a message; this is 2160.");
+    expect(calls).toHaveLength(1);
+  });
+
+  it("reports a message that was not sent, and quotes a refusal without a secret", async () => {
+    const unsent = fake(() => ({ data: { is_sent: false, message_id: "" }, message: "Slow mode is on" }));
+    expect((await get("kick").publish(post("hello"), connected, { fetch: unsent.fetcher }).catch((e) => e)).message).toBe("Kick did not send the message: Slow mode is on");
+    const denied = fake(() => Response.json({ data: {}, message: "Unauthorized" }, { status: 401 }));
+    const refused = await get("kick").publish(post("hello"), connected, { fetch: denied.fetcher }).catch((e) => e);
+    expect(refused.message).toBe("Kick answered 401: Unauthorized");
+    const renewal = fake(({ url }) => (url.endsWith("/oauth/token") ? { access_token: "kick-access-new", refresh_token: "kick-refresh-new", expires_in: 7200, token_type: "Bearer", scope: "user:read chat:write" } : { data: { is_sent: true, message_id: "y" } }));
+    const renewed = await get("kick").publish(post("hello"), { ...connected, access_token: "", expires_at: "" }, { fetch: renewal.fetcher });
+    expect(renewal.calls[0]).toEqual({
+      url: "https://id.kick.com/oauth/token",
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: { client_id: "kick-client-8f20", client_secret: "kick-secret-b4d6", grant_type: "refresh_token", refresh_token: "kick-refresh-2a9b" },
+    });
+    expect(renewed.credentials).toMatchObject({ access_token: "kick-access-new", refresh_token: "kick-refresh-new" });
+    const noChannel = await get("kick").publish(post("hello"), live, { fetch: denied.fetcher }).catch((e) => e);
+    expect(noChannel.message).toBe("This Kick account was connected without its channel. Reconnect it.");
+    for (const thrown of [refused, noChannel]) expect(leaks(thrown, app.client_secret, live.access_token, live.refresh_token)).toBe(false);
   });
 });
