@@ -373,6 +373,9 @@ try {
   ok(right.status === 200 && /HttpOnly/.test(right.headers.get("set-cookie")) && /^broadside_session=\d+\.[0-9a-f]{64}$/.test(cookie), "The right password starts an HttpOnly session that carries its own expiry");
   const crossSite = await fetch(`${locked}/api/login`, { method: "POST", headers: { "content-type": "application/json", "sec-fetch-site": "cross-site" }, body: JSON.stringify({ password: "correct horse" }) });
   ok(crossSite.status === 403, "A sign-in posted from another site is refused");
+  const signedInPage = await fetch(`${locked}/app`, { headers: { cookie } }).then((r) => r.text());
+  const out = await fetch(`${locked}/api/login`, { method: "DELETE" });
+  ok(signedInPage.includes("Sign out") && /Max-Age=0/.test(out.headers.get("set-cookie") ?? ""), "A signed-in page offers Sign out, and signing out clears the session cookie");
   ok((await fetch(`${locked}/app`, { headers: { cookie }, redirect: "manual" })).status === 200 && (await fetch(`${locked}/api/v1/accounts`, { headers: { ...ui, cookie } })).status === 200, "A signed-in session reaches the app and its API");
   ok((await fetch(`${locked}/api/v1/accounts`, { headers: auth })).status === 200, "API keys keep working when a password is set");
   let throttled = 0;

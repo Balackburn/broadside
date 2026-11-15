@@ -13,8 +13,13 @@ const LINKS = [
 ];
 
 /** A side rail on wide screens, a bottom bar on a phone: the same five places, where a thumb or a pointer expects them. */
-export function Rail() {
+export function Rail({ canSignOut = false }: { canSignOut?: boolean }) {
   const pathname = usePathname();
+  const signOut = async () => {
+    await fetch("/api/login", { method: "DELETE" });
+    // A full reload, not a client navigation: nothing from the signed-in session should stay in memory.
+    window.location.replace("/login");
+  };
   return (
     <>
       <aside className="sticky top-0 hidden h-dvh w-60 flex-none flex-col gap-1 bg-paper-2 p-4 lg:flex">
@@ -29,7 +34,15 @@ export function Rail() {
             </Link>
           ))}
         </nav>
-        <p className="note mt-auto px-2">Free and open source. Your keys stay on this machine.</p>
+        <div className="mt-auto">
+          {canSignOut ? (
+            <button type="button" className="rail-link w-full" onClick={signOut}>
+              <Icon name="out" />
+              Sign out
+            </button>
+          ) : null}
+          <p className="note mt-2 px-2">Free and open source. Your keys stay on this machine.</p>
+        </div>
       </aside>
       <nav className="fixed inset-x-0 bottom-0 z-40 flex justify-around bg-paper-2 px-2 pt-1 pb-[max(4px,env(safe-area-inset-bottom))] lg:hidden" aria-label="App">
         {LINKS.map((link) => (
