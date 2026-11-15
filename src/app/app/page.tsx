@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { Composer, type ComposerInitial } from "@/components/composer";
 import { listAccounts } from "@/lib/accounts";
-import { connector } from "@/lib/platforms";
+import { connector, fits } from "@/lib/platforms";
 import { getPost } from "@/lib/posts";
 
 export const dynamic = "force-dynamic";
@@ -12,7 +12,7 @@ export default async function ComposePage({ searchParams }: PageProps<"/app">) {
   const { edit } = await searchParams;
   const accounts = listAccounts().flatMap((account) => {
     const c = connector(account.platform);
-    return c ? [{ id: account.id, platform: account.platform, name: c.name, handle: account.handle, limits: c.limits }] : [];
+    return c ? [{ id: account.id, platform: account.platform, handle: account.handle, ...fits(c) }] : [];
   });
   const post = typeof edit === "string" ? getPost(edit) : undefined;
   const initial: ComposerInitial | undefined =
@@ -24,6 +24,8 @@ export default async function ComposePage({ searchParams }: PageProps<"/app">) {
           draft: post.status === "draft",
           targets: post.targets.map((t) => ({ account_id: t.account_id, content_override: t.content_override })),
           media: post.media.map((m) => ({ id: m.id, type: m.type, url: m.url, public_url: m.public_url, filename: m.filename, alt: m.alt })),
+          thread: post.thread,
+          repeat: post.repeat && { every: post.repeat.every, until: post.repeat.until },
         }
       : undefined;
   return <Composer key={initial?.id ?? "new"} accounts={accounts} initial={initial} />;

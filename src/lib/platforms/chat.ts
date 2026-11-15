@@ -75,6 +75,17 @@ export const telegram: Connector = {
     const username = sent.chat.username;
     return { id: String(sent.message_id), url: username ? `https://t.me/${username}/${sent.message_id}` : undefined };
   },
+
+  async reply(input, c, ctx) {
+    const { result: sent } = await call<TgResult<TgMessage>>(
+      ctx,
+      "Telegram",
+      tg(c, "sendMessage"),
+      json({ chat_id: c.chat_id, text: input.text, disable_notification: Boolean(input.options.silent), reply_parameters: { message_id: Number(input.parent.id) } }),
+    );
+    const username = sent.chat.username;
+    return { id: String(sent.message_id), url: username ? `https://t.me/${username}/${sent.message_id}` : undefined };
+  },
 };
 
 /* Discord ----------------------------------------------------------------- */
@@ -89,6 +100,7 @@ export const discord: Connector = {
   ],
   fields: [{ key: "webhook_url", label: "Webhook URL", kind: "url", placeholder: "https://discord.com/api/webhooks/…" }],
   limits: { maxChars: 2000, count: "graphemes", maxImages: 10, maxVideos: 1, requiresMedia: false },
+  noThread: "Discord cannot post a thread from a webhook.",
 
   async verify(c, ctx) {
     const hook = await call<{ name: string; guild_id?: string }>(ctx, "Discord", c.webhook_url);
@@ -129,6 +141,7 @@ export const slack: Connector = {
     { key: "channel", label: "Channel name", kind: "text", placeholder: "#announcements", optional: true },
   ],
   limits: { maxChars: 3000, count: "graphemes", maxImages: 4, maxVideos: 0, requiresMedia: false, pullsMedia: true },
+  noThread: "Slack cannot post a thread from an incoming webhook.",
 
   async verify(c) {
     if (!/^https:\/\/hooks\.slack\.com\//.test(c.webhook_url) && !process.env.BROADSIDE_ALLOW_ANY_WEBHOOK) {
@@ -197,6 +210,10 @@ export const sandbox: Connector = {
     return { handle: c.name || "Rehearsal" };
   },
   async publish(input) {
+    if (/\[fail\]/i.test(input.text)) throw new PublishError("The sandbox was asked to fail by a [fail] marker in the text.");
+    return { id: `sandbox-${Date.now()}-${Math.random().toString(36).slice(2, 8)}` };
+  },
+  async reply(input) {
     if (/\[fail\]/i.test(input.text)) throw new PublishError("The sandbox was asked to fail by a [fail] marker in the text.");
     return { id: `sandbox-${Date.now()}-${Math.random().toString(36).slice(2, 8)}` };
   },

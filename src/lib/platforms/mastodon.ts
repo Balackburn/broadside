@@ -56,4 +56,18 @@ export const mastodon: Connector = {
     });
     return { id: status.id, url: status.url };
   },
+
+  async reply(input, c, ctx) {
+    const status = await call<{ id: string; url: string }>(ctx, "Mastodon", `${base(c)}/api/v1/statuses`, {
+      method: "POST",
+      headers: { ...auth(c), "content-type": "application/json" },
+      body: JSON.stringify({
+        status: input.text,
+        in_reply_to_id: input.parent.id,
+        visibility: input.options.visibility ?? "public",
+        spoiler_text: input.options.spoiler_text || undefined,
+      }),
+    });
+    return { id: status.id, url: status.url };
+  },
 };

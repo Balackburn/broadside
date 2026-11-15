@@ -19,7 +19,7 @@ export function dataDir(): string {
   return dir;
 }
 
-const SCHEMA = `
+export const SCHEMA = `
 CREATE TABLE IF NOT EXISTS accounts (
   id TEXT PRIMARY KEY,
   platform TEXT NOT NULL,
@@ -85,6 +85,47 @@ CREATE TABLE IF NOT EXISTS api_keys (
 );
 `;
 
+/**
+ * Columns added after the first release. Each is added with ALTER TABLE only
+ * when PRAGMA table_info says it is missing, so a new database and one created
+ * by an older Broadside end up with the same shape and no data is touched.
+ */
+const ADDED: [table: string, column: string, definition: string][] = [
+  // Threads: the parts after the main text, and per target how far the thread has gone and the ids needed to continue it.
+  ["posts", "thread", "TEXT NOT NULL DEFAULT '[]'"],
+  ["targets", "parts", "TEXT NOT NULL DEFAULT '[]'"],
+  ["targets", "parts_done", "INTEGER NOT NULL DEFAULT 0"],
+  // Repeating posts: the rule, where its dates are counted from, and whether this occurrence has lined up the next one.
+  ["posts", "series_id", "TEXT"],
+  ["posts", "repeat_every", "TEXT"],
+  ["posts", "repeat_until", "TEXT"],
+  ["posts", "repeat_zone", "TEXT"],
+  ["posts", "repeat_anchor", "TEXT"],
+  ["posts", "repeat_count", "INTEGER NOT NULL DEFAULT 0"],
+  ["posts", "repeat_spawned", "INTEGER NOT NULL DEFAULT 0"],
+];
+
+export function migrate(handle: DatabaseSync): void {
+  // One writer at a time: a second process starting at the same moment waits here, then finds the columns present.
+  handle.exec("BEGIN IMMEDIATE");
+  try {
+    for (const [table, column, definition] of ADDED) {
+      const present = handle.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === column);
+      if (present) continue;
+      handle.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+      // Targets published before threads existed have one part done: the post itself.
+      if (column === "parts_done") {
+        handle.exec("UPDATE targets SET parts_done = 1, parts = json_array(json_object('id', external_id, 'url', external_url)) WHERE status = 'published' AND external_id IS NOT NULL");
+      }
+    }
+    handle.exec("CREATE INDEX IF NOT EXISTS posts_series ON posts(series_id)");
+    handle.exec("COMMIT");
+  } catch (error) {
+    handle.exec("ROLLBACK");
+    throw error;
+  }
+}
+
 type Global = typeof globalThis & { __broadsideDb?: { file: string; db: DatabaseSync } };
 
 export function db(): DatabaseSync {
@@ -94,6 +135,7 @@ export function db(): DatabaseSync {
   const handle = new DatabaseSync(file);
   handle.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;");
   handle.exec(SCHEMA);
+  migrate(handle);
   g.__broadsideDb = { file, db: handle };
   return handle;
 }

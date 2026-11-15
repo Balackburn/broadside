@@ -54,7 +54,7 @@ export const linkedin: Connector = {
     { key: "access_token", label: "Access token", kind: "secret" },
     { key: "organization_id", label: "Company page id", kind: "text", optional: true, help: "Leave empty to post as yourself. Posting as a page needs w_organization_social." },
   ],
-  limits: { maxChars: 3000, count: "graphemes", maxImages: 20, maxVideos: 0, requiresMedia: false },
+  limits: { maxChars: 3000, count: "graphemes", maxImages: 20, maxVideos: 0, requiresMedia: false, maxReplyChars: 1250 },
 
   async verify(c, ctx) {
     const me = await call<{ sub: string; name: string; picture?: string }>(ctx, "LinkedIn", "https://api.linkedin.com/v2/userinfo", {
@@ -94,5 +94,19 @@ export const linkedin: Connector = {
     const urn = response.headers.get("x-restli-id");
     if (!urn) throw new PublishError("LinkedIn accepted the post but returned no id.");
     return { id: urn, url: `https://www.linkedin.com/feed/update/${urn}/` };
+  },
+
+  // Each later part is a first-level comment on the post. Comment text is plain, so it is not escaped the way commentary is.
+  async reply(input, c, ctx) {
+    const post = input.root.id;
+    const response = await send(ctx, `${REST}/socialActions/${encodeURIComponent(post)}/comments`, {
+      method: "POST",
+      headers: headers(c),
+      body: JSON.stringify({ actor: c.author, object: post, message: { text: input.text } }),
+    });
+    const body = (await response.json().catch(() => ({}))) as { id?: string; commentUrn?: string };
+    const id = body.commentUrn ?? body.id ?? response.headers.get("x-restli-id");
+    if (!id) throw new PublishError("LinkedIn accepted the comment but returned no id.");
+    return { id, url: body.commentUrn ? `https://www.linkedin.com/feed/update/${post}?commentUrn=${encodeURIComponent(body.commentUrn)}` : undefined };
   },
 };

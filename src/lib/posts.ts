@@ -3,11 +3,19 @@ import { newId } from "./crypto";
 import { all, db, get, now, run } from "./db";
 import { getMedia, toItem, type Media } from "./media";
 import { guardedFetch } from "./net";
-import { connector, problems } from "./platforms";
-import { PublishError } from "./platforms/types";
+import { connector, fits, measure, problems, threadProblems } from "./platforms";
+import { PublishError, type PartRef } from "./platforms/types";
+import { EVERY, isTimeZone, nextOccurrence, type Every } from "./repeat";
 
 export type TargetStatus = "draft" | "scheduled" | "pending" | "publishing" | "retrying" | "published" | "failed" | "cancelled";
 export type PostStatus = "draft" | "scheduled" | "publishing" | "published" | "partial" | "failed" | "cancelled";
+
+/** A part behind one that is still being sent, or that failed, is "waiting": it goes out once the part before it has. */
+export type PartStatus = TargetStatus | "waiting";
+export type Part = { part: number; status: PartStatus; id: string | null; url: string | null };
+
+export type Repeat = { every: Every; until: string | null; timezone: string | null };
+export type RepeatInput = { every: Every; until?: string | null; timezone?: string | null };
 
 export type Target = {
   id: string;
@@ -22,17 +30,25 @@ export type Target = {
   url: string | null;
   attempts: number;
   published_at: string | null;
+  /** One entry per part, the main post first (part 1). A post with no thread has exactly one. */
+  parts: Part[];
 };
 
 export type Post = {
   id: string;
   content: string;
+  /** The parts that follow the main text, each published as a reply to the one before. */
+  thread: string[];
   media: Media[];
   status: PostStatus;
   publish_at: string | null;
   origin: string;
   created_at: string;
   updated_at: string;
+  /** Set while this occurrence is due to be followed by another. */
+  repeat: Repeat | null;
+  /** The repeating series this post is an occurrence of. `active` is false once nothing more will come of it. */
+  series: { id: string; active: boolean } | null;
   targets: Target[];
 };
 
@@ -41,15 +57,34 @@ export type TargetInput = { account_id: string; content_override?: string | null
 export type PostInput = {
   content: string;
   targets: TargetInput[];
+  thread?: string[];
   media_ids?: string[];
   publish_at?: string | null;
+  repeat?: RepeatInput | null;
   draft?: boolean;
   idempotency_key?: string;
   origin?: "ui" | "api" | "mcp";
 };
 
-type PostRow = { id: string; content: string; media: string; state: string; publish_at: string | null; origin: string; created_at: string; updated_at: string };
-type TargetRow = Omit<Target, "options" | "url"> & { options: string; external_url: string | null; post_id: string };
+type PostRow = {
+  id: string;
+  content: string;
+  media: string;
+  thread: string;
+  state: string;
+  publish_at: string | null;
+  origin: string;
+  created_at: string;
+  updated_at: string;
+  series_id: string | null;
+  repeat_every: Every | null;
+  repeat_until: string | null;
+  repeat_zone: string | null;
+  repeat_anchor: string | null;
+  repeat_count: number;
+  repeat_spawned: number;
+};
+type TargetRow = Omit<Target, "options" | "url" | "parts"> & { options: string; external_url: string | null; post_id: string; parts: string; parts_done: number };
 
 const MAX_ATTEMPTS = 3;
 
@@ -67,9 +102,20 @@ export function aggregate(statuses: TargetStatus[]): PostStatus {
   return "partial";
 }
 
+function partStatus(status: TargetStatus, index: number, done: number): PartStatus {
+  if (index < done) return "published";
+  if (index > done && (status === "publishing" || status === "retrying" || status === "failed")) return "waiting";
+  return status;
+}
+
+/** Whether any occurrence of a series can still be followed by another. */
+const seriesActive = (id: string): boolean => Boolean(get("SELECT 1 AS live FROM posts WHERE series_id = ? AND repeat_every IS NOT NULL AND repeat_spawned = 0 LIMIT 1", id));
+
 function hydrate(row: PostRow): Post {
-  const targets = all<TargetRow>("SELECT * FROM targets WHERE post_id = ? ORDER BY rowid", row.id).map(
-    (t): Target => ({
+  const thread = JSON.parse(row.thread) as string[];
+  const targets = all<TargetRow>("SELECT * FROM targets WHERE post_id = ? ORDER BY rowid", row.id).map((t): Target => {
+    const sent = JSON.parse(t.parts) as PartRef[];
+    return {
       id: t.id,
       account_id: t.account_id,
       platform: t.platform,
@@ -82,18 +128,24 @@ function hydrate(row: PostRow): Post {
       url: t.external_url,
       attempts: t.attempts,
       published_at: t.published_at,
-    }),
-  );
+      parts: Array.from({ length: thread.length + 1 }, (_, i) => ({ part: i + 1, status: partStatus(t.status, i, sent.length), id: sent[i]?.id ?? null, url: sent[i]?.url ?? null })),
+    };
+  });
   const media = (JSON.parse(row.media) as string[]).map((id) => getMedia(id)).filter((m): m is Media => Boolean(m));
+  const status = aggregate(targets.map((t) => t.status));
   return {
     id: row.id,
     content: row.content,
+    thread,
     media,
-    status: aggregate(targets.map((t) => t.status)),
+    // A thread that stopped part of the way is out there: the post is partly published, whatever its targets say.
+    status: (status === "failed" || status === "cancelled") && targets.some((t) => t.parts[0].status === "published") ? "partial" : status,
     publish_at: row.publish_at,
     origin: row.origin,
     created_at: row.created_at,
     updated_at: row.updated_at,
+    repeat: row.repeat_every ? { every: row.repeat_every, until: row.repeat_until, timezone: row.repeat_zone } : null,
+    series: row.series_id ? { id: row.series_id, active: seriesActive(row.series_id) } : null,
     targets,
   };
 }
@@ -123,8 +175,27 @@ function parseWhen(value: string | null | undefined): string | null {
   return date.toISOString();
 }
 
+function parseThread(value: unknown): string[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value) || value.some((part) => typeof part !== "string")) throw new InputError("thread must be a list of strings, one for each part after the main post.");
+  return value as string[];
+}
+
+function parseRepeat(value: unknown, publishAt: string | null): Repeat | null {
+  if (value === undefined || value === null) return null;
+  const input = value as Partial<RepeatInput>;
+  if (typeof value !== "object" || !EVERY.includes(input.every as Every)) throw new InputError('repeat.every must be "day", "week" or "month".');
+  if (!publishAt) throw new InputError("A repeating post needs a first time. Set publish_at as well.");
+  const timezone = input.timezone || null;
+  if (timezone && !isTimeZone(timezone)) throw new InputError(`"${timezone}" is not a time zone Broadside knows. Use an IANA name such as Europe/Paris.`);
+  // A bare date means through the end of that day, counted in UTC.
+  const until = input.until ? parseWhen(/^\d{4}-\d{2}-\d{2}$/.test(input.until) ? `${input.until}T23:59:59.999Z` : input.until) : null;
+  if (until && until < publishAt) throw new InputError("repeat.until is earlier than the first occurrence.");
+  return { every: input.every as Every, until, timezone };
+}
+
 /** Every reason a post cannot go to a target, found before anything is saved or sent. */
-function check(content: string, mediaIds: string[], targets: TargetInput[]) {
+function check(content: string, mediaIds: string[], targets: TargetInput[], thread: string[]) {
   if (!targets.length) throw new InputError("Choose at least one account to post to.");
   const media = mediaIds.map((id) => {
     const found = getMedia(id);
@@ -142,7 +213,7 @@ function check(content: string, mediaIds: string[], targets: TargetInput[]) {
     if (seen.has(account.id)) issues.push({ account_id: account.id, platform: account.platform, problems: ["This account is listed twice."] });
     seen.add(account.id);
     const c = connector(account.platform)!;
-    const found = problems(c, target.content_override ?? content, media.map((m) => ({ type: m.type, hasPublicUrl: Boolean(m.public_url) })));
+    const found = [...problems(c, target.content_override ?? content, media.map((m) => ({ type: m.type, hasPublicUrl: Boolean(m.public_url) }))), ...threadProblems(fits(c), thread)];
     if (found.length) issues.push({ account_id: account.id, platform: account.platform, problems: found });
     return { account, target };
   });
@@ -155,6 +226,20 @@ function check(content: string, mediaIds: string[], targets: TargetInput[]) {
   return resolved.map((r) => r!);
 }
 
+function addTarget(postId: string, account: { id: string; platform: string; handle: string }, target: { content_override?: string | null; options?: Record<string, unknown> }, status: TargetStatus): void {
+  run(
+    "INSERT INTO targets (id, post_id, account_id, platform, handle, content_override, options, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    newId("tgt"),
+    postId,
+    account.id,
+    account.platform,
+    account.handle,
+    target.content_override ?? null,
+    JSON.stringify(target.options ?? {}),
+    status,
+  );
+}
+
 export async function createPost(input: PostInput, fetcher: typeof fetch = fetch): Promise<Post> {
   if (input.idempotency_key) {
     const existing = get<{ id: string }>("SELECT id FROM posts WHERE idempotency_key = ?", input.idempotency_key);
@@ -162,8 +247,10 @@ export async function createPost(input: PostInput, fetcher: typeof fetch = fetch
   }
   const content = input.content ?? "";
   const mediaIds = input.media_ids ?? [];
-  const resolved = check(content, mediaIds, input.targets ?? []);
+  const thread = parseThread(input.thread);
+  const resolved = check(content, mediaIds, input.targets ?? [], thread);
   const publishAt = parseWhen(input.publish_at);
+  const repeat = parseRepeat(input.repeat, publishAt);
   const later = publishAt !== null && new Date(publishAt).getTime() > Date.now() + 1000;
   const status: TargetStatus = input.draft ? "draft" : later ? "scheduled" : "pending";
   const id = newId("post");
@@ -172,29 +259,23 @@ export async function createPost(input: PostInput, fetcher: typeof fetch = fetch
   database.exec("BEGIN");
   try {
     run(
-      "INSERT INTO posts (id, content, media, publish_at, origin, idempotency_key, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      "INSERT INTO posts (id, content, media, thread, publish_at, origin, idempotency_key, series_id, repeat_every, repeat_until, repeat_zone, repeat_anchor, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       id,
       content,
       JSON.stringify(mediaIds),
+      JSON.stringify(thread),
       publishAt,
       input.origin ?? "api",
       input.idempotency_key ?? null,
+      repeat ? newId("ser") : null,
+      repeat?.every ?? null,
+      repeat?.until ?? null,
+      repeat?.timezone ?? null,
+      repeat ? publishAt : null,
       stamp,
       stamp,
     );
-    for (const { account, target } of resolved) {
-      run(
-        "INSERT INTO targets (id, post_id, account_id, platform, handle, content_override, options, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        newId("tgt"),
-        id,
-        account.id,
-        account.platform,
-        account.handle,
-        target.content_override ?? null,
-        JSON.stringify(target.options ?? {}),
-        status,
-      );
-    }
+    for (const { account, target } of resolved) addTarget(id, account, target, status);
     database.exec("COMMIT");
   } catch (error) {
     database.exec("ROLLBACK");
@@ -213,6 +294,10 @@ async function publishPending(postId: string, fetcher: typeof fetch): Promise<vo
 /**
  * Publishes one target. The claim is a compare-and-set, so two schedulers or
  * a retry racing a tick can never send the same post twice.
+ *
+ * A thread goes out one part at a time, each a reply to the one before. Every
+ * part is recorded as soon as its network accepts it, so a target that stops
+ * at part 3 keeps parts 1 and 2 and a retry starts again at part 3.
  */
 export async function publishTarget(targetId: string, fetcher: typeof fetch = fetch): Promise<void> {
   const claimed = run(
@@ -222,6 +307,9 @@ export async function publishTarget(targetId: string, fetcher: typeof fetch = fe
   if (!claimed) return;
   const target = get<TargetRow>("SELECT * FROM targets WHERE id = ?", targetId)!;
   const post = getPost(target.post_id)!;
+  if (post.repeat) lineUpNext(post.id);
+  const texts = [target.content_override ?? post.content, ...post.thread];
+  const sent = JSON.parse(target.parts) as PartRef[];
   const fail = (message: string, retryable = false) => {
     if (retryable && target.attempts < MAX_ATTEMPTS) {
       const next = new Date(Date.now() + 30_000 * 2 ** (target.attempts - 1)).toISOString();
@@ -232,39 +320,98 @@ export async function publishTarget(targetId: string, fetcher: typeof fetch = fe
   };
   const c = connector(target.platform);
   if (!c || !getAccount(target.account_id)) return fail("This account was disconnected before the post went out.");
+  const reply = c.reply;
+  if (texts.length > 1 && !reply) return fail(threadProblems(fits(c), post.thread)[0]);
+  const ctx = { fetch: guardedFetch(fetcher) };
+  const options = JSON.parse(target.options) as Record<string, unknown>;
   try {
-    const result = await c.publish(
-      { text: target.content_override ?? post.content, media: post.media.map(toItem), options: JSON.parse(target.options) },
-      credentialsOf(target.account_id),
-      { fetch: guardedFetch(fetcher) },
-    );
-    if (result.credentials) saveCredentials(target.account_id, result.credentials);
-    run(
-      "UPDATE targets SET status = 'published', external_id = ?, external_url = ?, published_at = ?, error = NULL WHERE id = ?",
-      result.id,
-      result.url ?? null,
-      now(),
-      targetId,
-    );
+    for (let i = sent.length; i < texts.length; i++) {
+      // A second Broadside process starting up fails targets it finds mid-send. If that happened between parts, stop here and leave the rest to a retry.
+      if (i > 0 && !get("SELECT 1 AS ours FROM targets WHERE id = ? AND status = 'publishing'", targetId)) return;
+      // Read each time round: a network may rotate its token while the post goes out.
+      const credentials = credentialsOf(target.account_id);
+      const result =
+        i === 0
+          ? await c.publish({ text: texts[0], media: post.media.map(toItem), options }, credentials, ctx)
+          : await reply!({ text: texts[i], index: i, root: sent[0], parent: sent[i - 1], options }, credentials, ctx);
+      if (result.credentials) saveCredentials(target.account_id, result.credentials);
+      sent.push({ id: result.id, url: result.url, ref: result.ref });
+      // Written before the next part is sent. This row is what stops a retry from sending a part twice.
+      run("UPDATE targets SET parts = ?, parts_done = ? WHERE id = ?", JSON.stringify(sent), sent.length, targetId);
+      if (i === 0) run("UPDATE targets SET external_id = ?, external_url = ?, published_at = ? WHERE id = ?", result.id, result.url ?? null, now(), targetId);
+    }
+    run("UPDATE targets SET status = 'published', error = NULL WHERE id = ?", targetId);
     markAccount(target.account_id, null);
   } catch (error) {
     const known = error instanceof PublishError;
-    const message = known ? error.message : `${c.name} failed unexpectedly: ${(error as Error).message}`;
+    const reason = known ? error.message : `${c.name} failed unexpectedly: ${(error as Error).message}`;
+    // In a thread the error says which part stopped, so it is clear what is already out.
+    const message = texts.length > 1 ? `Part ${sent.length + 1} of ${texts.length}: ${reason}` : reason;
     fail(message, known && error.retryable);
-    if (known && /\b40[13]\b/.test(message)) markAccount(target.account_id, message);
+    if (known && /\b40[13]\b/.test(reason)) markAccount(target.account_id, reason);
   }
   run("UPDATE posts SET updated_at = ? WHERE id = ?", now(), target.post_id);
+}
+
+/**
+ * Creates the next occurrence of a repeating post as its own scheduled post.
+ * The flag on the parent is flipped in the same transaction as the insert, so
+ * however many clocks, targets or processes get here, exactly one of them
+ * creates it. The copy carries the text, thread, media and accounts as they
+ * are now, so an edit to one occurrence carries forward.
+ */
+function lineUpNext(postId: string): void {
+  const database = db();
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    const claimed = run("UPDATE posts SET repeat_spawned = 1 WHERE id = ? AND repeat_spawned = 0 AND repeat_every IS NOT NULL AND repeat_anchor IS NOT NULL", postId);
+    const row = claimed ? get<PostRow>("SELECT * FROM posts WHERE id = ?", postId) : undefined;
+    const next = row && nextOccurrence({ anchor: row.repeat_anchor!, every: row.repeat_every!, zone: row.repeat_zone, until: row.repeat_until }, row.repeat_count, Date.now());
+    // An account disconnected since the last occurrence is left out of the next one.
+    const targets = next ? all<TargetRow>("SELECT * FROM targets WHERE post_id = ? ORDER BY rowid", postId).filter((t) => getAccount(t.account_id)) : [];
+    if (row && next && targets.length) {
+      const id = newId("post");
+      const stamp = now();
+      run(
+        "INSERT INTO posts (id, content, media, thread, publish_at, origin, series_id, repeat_every, repeat_until, repeat_zone, repeat_anchor, repeat_count, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        id,
+        row.content,
+        row.media,
+        row.thread,
+        next.at,
+        row.origin,
+        row.series_id,
+        row.repeat_every,
+        row.repeat_until,
+        row.repeat_zone,
+        row.repeat_anchor,
+        next.count,
+        stamp,
+        stamp,
+      );
+      for (const t of targets) addTarget(id, { id: t.account_id, platform: t.platform, handle: t.handle }, { content_override: t.content_override, options: JSON.parse(t.options) }, "scheduled");
+    }
+    database.exec("COMMIT");
+  } catch (error) {
+    database.exec("ROLLBACK");
+    // The flag is rolled back with the rest, so the next target or tick tries again; the post in hand still goes out.
+    console.error("[broadside] could not line up the next occurrence:", error);
+  }
 }
 
 function editable(post: Post): void {
   if (post.status !== "draft" && post.status !== "scheduled") {
     throw new InputError(`This post is ${post.status}; only drafts and scheduled posts can be changed.`);
   }
+  // A target waiting to retry counts as scheduled, but some of it may be out already. Changing it would send those parts again.
+  if (post.targets.some((t) => t.status !== "draft" && t.status !== "scheduled")) {
+    throw new InputError("This post has started going out; only drafts and scheduled posts can be changed. Cancel it or wait for it to finish.");
+  }
 }
 
 export async function updatePost(
   id: string,
-  patch: { content?: string; publish_at?: string | null; targets?: TargetInput[]; media_ids?: string[]; draft?: boolean },
+  patch: { content?: string; publish_at?: string | null; targets?: TargetInput[]; thread?: string[]; media_ids?: string[]; repeat?: RepeatInput | null; draft?: boolean },
   fetcher: typeof fetch = fetch,
 ): Promise<Post> {
   const post = getPost(id);
@@ -274,29 +421,37 @@ export async function updatePost(
   const mediaIds = patch.media_ids ?? post.media.map((m) => m.id);
   const targets: TargetInput[] =
     patch.targets ?? post.targets.map((t) => ({ account_id: t.account_id, content_override: t.content_override, options: t.options }));
-  const resolved = check(content, mediaIds, targets);
+  const thread = patch.thread === undefined ? post.thread : parseThread(patch.thread);
+  const resolved = check(content, mediaIds, targets, thread);
   const publishAt = patch.publish_at === undefined ? post.publish_at : parseWhen(patch.publish_at);
+  const repeat = patch.repeat === undefined ? post.repeat : parseRepeat(patch.repeat, publishAt);
+  const row = get<PostRow>("SELECT * FROM posts WHERE id = ?", id)!;
+  // Later occurrences are counted from the anchor. It moves only when this occurrence is given a new time or a new rule.
+  const moved = publishAt !== null && (publishAt !== post.publish_at || repeat?.every !== post.repeat?.every || repeat?.timezone !== post.repeat?.timezone || !row.repeat_anchor);
+  const anchor = repeat && moved ? publishAt : row.repeat_anchor;
   const draft = patch.draft ?? post.status === "draft";
   const later = publishAt !== null && new Date(publishAt).getTime() > Date.now() + 1000;
   const status: TargetStatus = draft ? "draft" : later ? "scheduled" : "pending";
   const database = db();
   database.exec("BEGIN");
   try {
-    run("UPDATE posts SET content = ?, media = ?, publish_at = ?, updated_at = ? WHERE id = ?", content, JSON.stringify(mediaIds), publishAt, now(), id);
+    run(
+      "UPDATE posts SET content = ?, media = ?, thread = ?, publish_at = ?, series_id = ?, repeat_every = ?, repeat_until = ?, repeat_zone = ?, repeat_anchor = ?, repeat_count = ?, updated_at = ? WHERE id = ?",
+      content,
+      JSON.stringify(mediaIds),
+      JSON.stringify(thread),
+      publishAt,
+      repeat ? (row.series_id ?? newId("ser")) : row.series_id,
+      repeat?.every ?? null,
+      repeat?.until ?? null,
+      repeat?.timezone ?? null,
+      anchor,
+      repeat && moved ? 0 : row.repeat_count,
+      now(),
+      id,
+    );
     run("DELETE FROM targets WHERE post_id = ?", id);
-    for (const { account, target } of resolved) {
-      run(
-        "INSERT INTO targets (id, post_id, account_id, platform, handle, content_override, options, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        newId("tgt"),
-        id,
-        account.id,
-        account.platform,
-        account.handle,
-        target.content_override ?? null,
-        JSON.stringify(target.options ?? {}),
-        status,
-      );
-    }
+    for (const { account, target } of resolved) addTarget(id, account, target, status);
     database.exec("COMMIT");
   } catch (error) {
     database.exec("ROLLBACK");
@@ -320,6 +475,8 @@ export async function publishNow(id: string, fetcher: typeof fetch = fetch): Pro
 export function cancelPost(id: string): Post {
   const post = getPost(id);
   if (!post) throw new InputError(`No post with id ${id}.`);
+  // Cancelling one occurrence leaves its series running, so the next one is lined up before this one is dropped.
+  if (post.repeat && post.status === "scheduled") lineUpNext(id);
   const changed = run("UPDATE targets SET status = 'cancelled' WHERE post_id = ? AND status IN ('draft', 'scheduled', 'retrying')", id);
   if (!changed) throw new InputError(`This post is ${post.status}; there is nothing left to cancel. Published posts stay on their networks.`);
   run("UPDATE posts SET updated_at = ? WHERE id = ?", now(), id);
@@ -327,8 +484,28 @@ export function cancelPost(id: string): Post {
 }
 
 export function deletePost(id: string): boolean {
+  const post = getPost(id);
+  // Removing a scheduled occurrence is like cancelling it: the series carries on. stopSeries is what ends one.
+  if (post?.repeat && post.status === "scheduled") lineUpNext(id);
   return run("DELETE FROM posts WHERE id = ?", id) > 0;
 }
+
+/**
+ * Ends the repeating series a post belongs to: no occurrence will create
+ * another, and the ones still waiting for their time are cancelled. What has
+ * been published stays where it is.
+ */
+export function stopSeries(id: string): Post {
+  const post = getPost(id);
+  if (!post) throw new InputError(`No post with id ${id}.`);
+  if (!post.series) throw new InputError("This post does not repeat, so there is no series to stop.");
+  const ended = run("UPDATE posts SET repeat_every = NULL WHERE series_id = ? AND repeat_every IS NOT NULL", post.series.id);
+  const cancelled = run("UPDATE targets SET status = 'cancelled' WHERE status = 'scheduled' AND post_id IN (SELECT id FROM posts WHERE series_id = ?)", post.series.id);
+  if (!ended && !cancelled) throw new InputError("This series has already stopped.");
+  run("UPDATE posts SET updated_at = ? WHERE series_id = ?", now(), post.series.id);
+  return getPost(id)!;
+}
+
 
 export async function retryTarget(postId: string, targetId: string, fetcher: typeof fetch = fetch): Promise<Post> {
   const changed = run("UPDATE targets SET status = 'pending', attempts = 0 WHERE id = ? AND post_id = ? AND status = 'failed'", targetId, postId);
@@ -353,7 +530,41 @@ export function dueTargets(at = now()): string[] {
  * left for a person to retry.
  */
 export function recoverInterrupted(): number {
-  return run(
-    "UPDATE targets SET status = 'failed', error = 'Broadside stopped while this was being sent. Check the network before retrying, in case it went out.' WHERE status = 'publishing'",
-  );
+  const stuck = all<{ id: string; parts_done: number; thread: string }>("SELECT t.id, t.parts_done, p.thread FROM targets t JOIN posts p ON p.id = t.post_id WHERE t.status = 'publishing'");
+  let failed = 0;
+  for (const target of stuck) {
+    const total = (JSON.parse(target.thread) as string[]).length + 1;
+    const what = total > 1 ? `part ${target.parts_done + 1} of ${total}` : "this";
+    failed += run("UPDATE targets SET status = 'failed', error = ? WHERE id = ? AND status = 'publishing'", `Broadside stopped while ${what} was being sent. Check the network before retrying, in case it went out.`, target.id);
+  }
+  return failed;
+}
+
+/** A dry run: how the text, media and thread fit each chosen account. Sends and saves nothing. */
+export function inspectPost(input: { content?: string; targets?: TargetInput[]; media_ids?: string[]; thread?: string[] }) {
+  const media = (input.media_ids ?? []).map((id) => {
+    const found = getMedia(id);
+    if (!found) throw new InputError(`No media with id ${id}.`);
+    return { type: found.type, hasPublicUrl: Boolean(found.public_url) };
+  });
+  const thread = parseThread(input.thread);
+  return (input.targets ?? []).map((target) => {
+    const account = getAccount(target.account_id);
+    const c = account && connector(account.platform);
+    if (!account || !c) return { account_id: target.account_id, ok: false, problems: ["No connected account has this id."] };
+    const text = target.content_override ?? input.content ?? "";
+    const found = [...problems(c, text, media), ...threadProblems(fits(c), thread)];
+    const replyMax = c.limits.maxReplyChars ?? c.limits.maxChars;
+    return {
+      account_id: account.id,
+      platform: account.platform,
+      handle: account.handle,
+      ok: found.length === 0,
+      problems: found,
+      length: measure(text, c.limits.count),
+      max_chars: c.limits.maxChars,
+      // Part 1 is the main post; these are the parts after it, each against the network's limit for a reply.
+      thread: thread.map((part, i) => ({ part: i + 2, length: measure(part, c.limits.count), max_chars: replyMax })),
+    };
+  });
 }

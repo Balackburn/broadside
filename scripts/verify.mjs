@@ -46,6 +46,9 @@ function step(title, command, args) {
 
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64");
 const received = { mastodon: [], bluesky: [], discord: [], telegram: [], webhook: [], slack: [] };
+// Texts the stand-in Mastodon turns away the first time it sees them, so a thread can fail part of the way and be retried.
+const rejectedOnce = new Set();
+received.telegramReplies = [];
 
 function networks() {
   const server = createServer((req, res) => {
@@ -74,16 +77,26 @@ function networks() {
       if (url === "/api/v1/accounts/verify_credentials") return json({ acct: "tester", avatar: null });
       if (url === "/api/v2/media") return json({ id: "media-1" });
       if (url === "/api/v1/statuses") {
-        received.mastodon.push(parsed());
-        return json({ id: "101", url: `http://${req.headers.host}/@tester/101` });
+        const status = parsed();
+        if (status.status?.includes("[reject once]") && !rejectedOnce.has(status.status)) {
+          rejectedOnce.add(status.status);
+          return json({ error: "Validation failed: the stand-in refused this once" }, 422);
+        }
+        // Each status gets its own id and remembers which status it answers.
+        const id = String(101 + received.mastodon.length);
+        received.mastodon.push({ ...status, id });
+        return json({ id, url: `http://${req.headers.host}/@tester/${id}` });
       }
       // Bluesky
       if (url === "/xrpc/com.atproto.server.createSession") return json({ accessJwt: "jwt", did: "did:plc:test", handle: "tester.test" });
       if (url.startsWith("/xrpc/app.bsky.actor.getProfile")) return json({});
       if (url === "/xrpc/com.atproto.repo.uploadBlob") return json({ blob: { $type: "blob", ref: { $link: "bafy" }, mimeType: "image/png", size: raw.length } });
       if (url === "/xrpc/com.atproto.repo.createRecord") {
-        received.bluesky.push(parsed().record);
-        return json({ uri: "at://did:plc:test/app.bsky.feed.post/3abc", cid: "cid" });
+        // Each record gets its own uri and cid; a reply must quote both for its root and its parent.
+        const n = received.bluesky.length;
+        const made = { uri: `at://did:plc:test/app.bsky.feed.post/3abc${n || ""}`, cid: `cid-${n}` };
+        received.bluesky.push({ ...parsed().record, ...made });
+        return json(made);
       }
       // Discord
       if (url === "/api/webhooks/1/token") return json({ name: "Announcements", guild_id: "g1", channel_id: "c1" });
@@ -95,8 +108,11 @@ function networks() {
       if (url.endsWith("/getMe")) return json({ ok: true, result: { id: 1 } });
       if (url.endsWith("/getChat")) return json({ ok: true, result: { title: "Channel", username: "chan" } });
       if (url.endsWith("/sendMessage") || url.endsWith("/sendPhoto")) {
+        // Each message gets its own id; a reply names the message it answers in reply_parameters.
+        const message_id = 7 + received.telegram.length;
         received.telegram.push(text);
-        return json({ ok: true, result: { message_id: 7, chat: { username: "chan" } } });
+        received.telegramReplies.push({ message_id, text: parsed().text, reply_to: parsed().reply_parameters?.message_id ?? null });
+        return json({ ok: true, result: { message_id, chat: { username: "chan" } } });
       }
       // Slack + generic webhook
       if (url === "/slack") {
@@ -219,7 +235,7 @@ try {
   await client.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp`), { requestInit: { headers: { authorization: `Bearer ${token}` } } }));
   ok(client.getServerVersion().name === "broadside", "An MCP client completes the handshake over HTTP");
   const tools = (await client.listTools()).tools.map((t) => t.name).sort();
-  const expected = ["cancel_post", "check_post", "connect_account", "create_post", "delete_post", "disconnect_account", "get_post", "list_accounts", "list_media", "list_platforms", "list_posts", "publish_post", "retry_target", "update_post", "upload_media"];
+  const expected = ["cancel_post", "check_post", "connect_account", "create_post", "delete_post", "disconnect_account", "get_post", "list_accounts", "list_media", "list_platforms", "list_posts", "publish_post", "retry_target", "stop_series", "update_post", "upload_media"];
   ok(expected.every((name) => tools.includes(name)), `The server offers its ${expected.length} tools`, `got ${tools.join(", ")}`);
   const call = async (name, args = {}) => client.callTool({ name, arguments: args });
 
@@ -281,6 +297,99 @@ try {
   const noZone = await call("create_post", { content: "x", targets: [{ account_id: ids.sandbox }], publish_at: "2030-01-01T09:00:00" });
   ok(noZone.isError && /no time zone/.test(noZone.content[0].text), "A time without a zone is refused");
   ok(result(await call("list_posts", { status: "published" })).length >= 3, "list_posts filters by status");
+
+  // Threads: parts after the main post, each a reply to the one before
+  ok(platforms.find((p) => p.id === "mastodon").threads === true && platforms.find((p) => p.id === "discord").threads === false, "list_platforms says which networks can take a thread");
+  const threaders = [ids.mastodon, ids.bluesky, ids.telegram, ids.sandbox].map((account_id) => ({ account_id }));
+  const counts = () => [received.mastodon.length, received.bluesky.length, received.telegram.length, received.discord.length].join(",");
+  const beforeThreads = counts();
+  const threadCheck = result(await call("check_post", { content: "main", thread: ["second", "y".repeat(501)], targets: [{ account_id: ids.mastodon }, { account_id: ids.discord }] }));
+  ok(
+    threadCheck[0].ok === false && threadCheck[0].thread[1].length === 501 && threadCheck[0].thread[1].max_chars === 500 && /part 3 is 501/.test(threadCheck[0].problems.join(" ")) && threadCheck[1].problems[0] === "Discord cannot post a thread from a webhook.",
+    "check_post measures every thread part and names a network that cannot thread",
+  );
+  const noThread = await call("create_post", { content: "main", thread: ["first comment"], targets: [...threaders, { account_id: ids.discord }] });
+  ok(noThread.isError === true && /Discord cannot post a thread from a webhook\./.test(noThread.content[0].text), "create_post refuses a thread for Discord by name instead of dropping the parts");
+  const longPart = await call("create_post", { content: "main", thread: ["fine", "y".repeat(501)], targets: threaders });
+  ok(longPart.isError === true && /Mastodon allows 500 characters in a reply; part 3 is 501/.test(longPart.content[0].text), "create_post refuses a thread when one part does not fit one network");
+  ok(counts() === beforeThreads, "Nothing was sent to any network by the refused threads");
+
+  const threaded = result(await call("create_post", { content: "verify thread: one", thread: ["verify thread: two", "verify thread: three"], targets: threaders }));
+  ok(threaded.status === "published" && threaded.thread.length === 2, "create_post publishes a three-part thread", JSON.stringify(threaded.targets.map((t) => [t.platform, t.status, t.error])));
+  ok(
+    threaded.targets.every((t) => t.parts.length === 3 && t.parts.every((p, i) => p.part === i + 1 && p.status === "published" && p.id)),
+    "Every target reports each part's own status",
+  );
+  const [m1, m2, m3] = received.mastodon.slice(-3);
+  ok(
+    m1.status === "verify thread: one" && !m1.in_reply_to_id && m2.status === "verify thread: two" && m2.in_reply_to_id === m1.id && m3.status === "verify thread: three" && m3.in_reply_to_id === m2.id,
+    "Mastodon received the parts in order, each in reply to the one before",
+  );
+  const [b1, b2, b3] = received.bluesky.slice(-3);
+  ok(
+    !b1.reply && b2.reply.root.uri === b1.uri && b2.reply.root.cid === b1.cid && b2.reply.parent.uri === b1.uri && b3.reply.root.uri === b1.uri && b3.reply.root.cid === b1.cid && b3.reply.parent.uri === b2.uri && b3.reply.parent.cid === b2.cid,
+    "Bluesky received each reply with the root's and the parent's uri and cid",
+  );
+  const [t1, t2, t3] = received.telegramReplies.slice(-3);
+  ok(t1.reply_to === null && t2.reply_to === t1.message_id && t3.reply_to === t2.message_id && t3.text === "verify thread: three", "Telegram received each part as a reply to the message before it");
+  const partUrls = threaded.targets.find((t) => t.platform === "mastodon").parts.map((p) => p.url);
+  ok(partUrls.every((u, i) => u === `${net}/@tester/${[m1, m2, m3][i].id}`) && threaded.targets.find((t) => t.platform === "telegram").parts[2].url === `https://t.me/chan/${t3.message_id}`, "Each part carries the public link to its own post");
+
+  // A thread that stops part of the way keeps what went out, and a retry continues from there
+  const mastodonBefore = received.mastodon.length;
+  const broken = result(await call("create_post", { content: "resume: one", thread: ["resume: two", "resume: three [reject once]", "resume: four"], targets: [{ account_id: ids.mastodon }] }));
+  const stuck = broken.targets[0];
+  ok(
+    broken.status === "partial" && stuck.status === "failed" && /^Part 3 of 4: Mastodon answered 422/.test(stuck.error) && stuck.parts.map((p) => p.status).join(",") === "published,published,failed,waiting",
+    "A thread that fails at part 3 says so, and keeps parts 1 and 2 as published",
+    JSON.stringify(stuck),
+  );
+  ok(received.mastodon.length === mastodonBefore + 2, "Only the first two parts reached the network");
+  const resumed = result(await call("retry_target", { post_id: broken.id, target_id: stuck.id }));
+  const resumedTexts = received.mastodon.slice(mastodonBefore).map((x) => x.status);
+  ok(
+    resumed.status === "published" && resumedTexts.join("|") === "resume: one|resume: two|resume: three [reject once]|resume: four",
+    "Retrying resumes at part 3: every part reached the network exactly once",
+    resumedTexts.join("|"),
+  );
+  const chain = received.mastodon.slice(mastodonBefore);
+  ok(chain[2].in_reply_to_id === chain[1].id && chain[3].in_reply_to_id === chain[2].id, "The resumed parts answer the parts that were already out");
+
+  // Repeating posts: the next occurrence is its own scheduled post, created once
+  const firstAt = new Date(Date.now() + 2500);
+  const repeating = result(await call("create_post", { content: "repeats daily, says verify", thread: ["with its first comment"], targets: [{ account_id: ids.sandbox }, { account_id: ids.mastodon }], publish_at: firstAt.toISOString(), repeat: { every: "day" } }));
+  ok(repeating.status === "scheduled" && repeating.repeat.every === "day" && /^ser_/.test(repeating.series.id) && repeating.series.active === true, "A post with repeat is scheduled and starts a series");
+  const seriesPosts = async () => result(await call("list_posts", { limit: 100 })).filter((p) => p.series?.id === repeating.series.id).sort((a, b) => a.publish_at.localeCompare(b.publish_at));
+  await until(async () => (result(await call("get_post", { post_id: repeating.id })).status === "published" ? true : null), "the first occurrence to publish", 20000);
+  await sleep(1500); // several more ticks pass; they must not create a second copy
+  let occurrences = await seriesPosts();
+  const dayLater = new Date(firstAt.getTime() + 86400000).toISOString();
+  ok(
+    occurrences.length === 2 && occurrences[1].status === "scheduled" && occurrences[1].publish_at === dayLater && occurrences[1].id !== repeating.id && occurrences[1].thread[0] === "with its first comment" && occurrences[1].targets.length === 2,
+    "When the occurrence goes out, the next one is created once, as its own scheduled post a day later",
+    JSON.stringify(occurrences.map((p) => [p.status, p.publish_at])),
+  );
+  ok(received.mastodon.filter((x) => x.status === "repeats daily, says verify").length === 1, "The occurrence itself was sent once");
+  const skipped = result(await call("cancel_post", { post_id: occurrences[1].id }));
+  occurrences = await seriesPosts();
+  ok(
+    skipped.status === "cancelled" && occurrences.length === 3 && occurrences[2].status === "scheduled" && occurrences[2].publish_at === new Date(firstAt.getTime() + 2 * 86400000).toISOString(),
+    "Cancelling one occurrence cancels only it: the one after is lined up",
+  );
+  const ended = result(await call("stop_series", { post_id: repeating.id }));
+  occurrences = await seriesPosts();
+  ok(
+    ended.series.active === false && ended.repeat === null && occurrences.map((p) => p.status).join(",") === "published,cancelled,cancelled",
+    "stop_series ends the series: the waiting occurrence is cancelled and nothing new is created",
+    occurrences.map((p) => p.status).join(","),
+  );
+  const monthEnd = result(await call("create_post", { content: "monthly", targets: [{ account_id: ids.sandbox }], publish_at: "2031-01-31T09:00:00Z", repeat: { every: "month", until: "2031-12-31" } }));
+  await call("publish_post", { post_id: monthEnd.id });
+  const february = result(await call("list_posts", { limit: 100 })).find((p) => p.series?.id === monthEnd.series.id && p.status === "scheduled");
+  ok(monthEnd.repeat.until === "2031-12-31T23:59:59.999Z" && february.publish_at === "2031-02-28T09:00:00.000Z", "A monthly post set for 31 January comes round on the last day of February");
+  await call("stop_series", { post_id: monthEnd.id });
+  const needsTime = await call("create_post", { content: "x", targets: [{ account_id: ids.sandbox }], repeat: { every: "week" } });
+  ok(needsTime.isError && /needs a first time/.test(needsTime.content[0].text), "A repeat with no first time is refused");
   await client.close();
 
   // The same database through the local stdio server
@@ -306,11 +415,50 @@ try {
   const timed = result(await careful.callTool({ name: "update_post", arguments: { post_id: held.id, draft: false, publish_at: new Date(Date.now() + 60000).toISOString() } }));
   const forced = await careful.callTool({ name: "publish_post", arguments: { post_id: held.id } });
   ok(held.status === "draft" && pushed.status === "draft" && timed.status === "draft" && forced.isError, "In drafts-only mode an agent cannot publish or schedule by any tool");
+  const preparedAt = new Date(Date.now() + 1200).toISOString();
+  const prepared = result(await careful.callTool({ name: "create_post", arguments: { content: "an agent's weekly idea", thread: ["and its first comment"], targets: [{ account_id: ids.sandbox }], publish_at: preparedAt, repeat: { every: "day" } } }));
+  const reworked = result(await careful.callTool({ name: "update_post", arguments: { post_id: prepared.id, draft: false, thread: ["a reworded comment"], repeat: { every: "week" } } }));
+  await sleep(2500); // its time passes while it is still a draft
+  const afterTime = result(await careful.callTool({ name: "get_post", arguments: { post_id: prepared.id } }));
+  const dropped = result(await careful.callTool({ name: "cancel_post", arguments: { post_id: prepared.id } }));
+  const agentSeries = result(await careful.callTool({ name: "list_posts", arguments: { limit: 100 } })).filter((p) => p.series?.id === prepared.series.id);
+  ok(
+    prepared.status === "draft" && prepared.thread.length === 1 && prepared.repeat.every === "day" && reworked.status === "draft" && reworked.repeat.every === "week" && afterTime.status === "draft" && afterTime.targets[0].parts.every((p) => p.status === "draft") && dropped.status === "cancelled" && agentSeries.length === 1,
+    "In drafts-only mode a thread and a repeat stay a draft: nothing goes out at its time, and no occurrence is created",
+    JSON.stringify([prepared.status, reworked.status, afterTime.status, dropped.status, agentSeries.length]),
+  );
   await careful.close();
 
   // REST parity and the web pages
   const rest = await api("/api/v1/posts", { method: "POST", headers: { ...auth, "idempotency-key": "rest-1" }, body: JSON.stringify({ content: "from REST", targets: [{ account_id: ids.sandbox }] }) });
   ok(rest.status === 200 && rest.body.data.status === "published" && rest.body.data.origin === "api", "The REST API publishes too");
+  const restThread = await api("/api/v1/posts", { method: "POST", headers: auth, body: JSON.stringify({ content: "REST thread", thread: ["REST first comment"], targets: [{ account_id: ids.mastodon }, { account_id: ids.sandbox }] }) });
+  const restRead = await api(`/api/v1/posts/${restThread.body.data.id}`, { headers: auth });
+  const restParts = restRead.body.data.targets.find((t) => t.platform === "mastodon").parts;
+  ok(
+    restThread.status === 200 && restRead.body.data.thread[0] === "REST first comment" && restParts.length === 2 && restParts.every((p) => p.status === "published" && p.url.startsWith(`${net}/@tester/`)) && received.mastodon.at(-1).in_reply_to_id === received.mastodon.at(-2).id,
+    "REST: a first comment is a thread of one extra part, and GET returns each part's status and url",
+  );
+  const restBad = await api("/api/v1/posts", { method: "POST", headers: auth, body: JSON.stringify({ content: "REST thread", thread: ["comment"], targets: [{ account_id: ids.slack }] }) });
+  ok(restBad.status === 400 && restBad.body.error.details[0].problems[0] === "Slack cannot post a thread from an incoming webhook.", "REST: a thread for a network that cannot thread is refused with the reason");
+  const restCheck = await api("/api/v1/check", { method: "POST", headers: auth, body: JSON.stringify({ content: "main", thread: ["two"], targets: [{ account_id: ids.mastodon }] }) });
+  ok(restCheck.body.data[0].ok === true && restCheck.body.data[0].thread[0].part === 2 && restCheck.body.data[0].thread[0].length === 3, "REST: the dry run measures thread parts");
+  const restRepeat = await api("/api/v1/posts", { method: "POST", headers: auth, body: JSON.stringify({ content: "REST weekly", thread: ["REST weekly comment"], targets: [{ account_id: ids.sandbox }], publish_at: "2031-03-03T09:00:00+01:00", repeat: { every: "week", until: "2031-06-30", timezone: "Europe/Paris" } }) });
+  const restPatched = await api(`/api/v1/posts/${restRepeat.body.data.id}`, { method: "PATCH", headers: auth, body: JSON.stringify({ thread: ["REST weekly comment", "and a second"], repeat: { every: "month" } }) });
+  ok(
+    restRepeat.body.data.status === "scheduled" && restRepeat.body.data.repeat.every === "week" && restRepeat.body.data.repeat.timezone === "Europe/Paris" && restRepeat.body.data.series.active === true && restPatched.body.data.thread.length === 2 && restPatched.body.data.repeat.every === "month" && restPatched.body.data.series.id === restRepeat.body.data.series.id,
+    "REST: POST and PATCH accept thread and repeat, and GET returns them with the series",
+    JSON.stringify(restPatched.body),
+  );
+  const seriesPage = await fetch(`${base}/app/posts?post=${restRepeat.body.data.id}`).then((r) => r.text());
+  ok(seriesPage.includes("Stop repeating") && seriesPage.includes("Repeats every month") && seriesPage.includes("and a second") && seriesPage.includes("Thread of 3"), "The posts page shows a thread's parts, the series and Stop repeating");
+  const threadPage = await fetch(`${base}/app/posts?post=${broken.id}`).then((r) => r.text());
+  ok(threadPage.includes("resume: three [reject once]") && threadPage.includes("Part 4"), "The posts page lists each part of a thread under its target");
+  const restEdit = await fetch(`${base}/app?edit=${restRepeat.body.data.id}`).then((r) => r.text());
+  ok(restEdit.includes("Edit post") && restEdit.includes("and a second") && restEdit.includes("Add to thread") && restEdit.includes("Part 3"), "The composer opens a scheduled thread for editing, with its parts and Add to thread");
+  const restStopped = await api(`/api/v1/posts/${restRepeat.body.data.id}/cancel`, { method: "POST", headers: auth, body: JSON.stringify({ series: true }) });
+  const restAgain = await api(`/api/v1/posts/${restRepeat.body.data.id}/cancel`, { method: "POST", headers: auth, body: JSON.stringify({ series: true }) });
+  ok(restStopped.body.data.status === "cancelled" && restStopped.body.data.series.active === false && restAgain.status === 400 && /already stopped/.test(restAgain.body.error.message), "REST: cancel with series true stops the whole series");
   const pages = [
     ["/", "Broadside"],
     ["/app", "Compose"],

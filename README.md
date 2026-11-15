@@ -12,6 +12,10 @@ It checks every account against that network's rules before it sends anything. I
 
 You can publish now, schedule for later or save a draft. One network failing does not hold up the others. Each target keeps its own status and public link, and you can retry a failed target on its own.
 
+A post can carry a thread: extra parts published in order after the main text, each as a reply to the one before. A first comment is a thread with one extra part. Every part is measured against each network's limit before anything is sent, and a network that cannot thread is refused by name. If part 3 fails, parts 1 and 2 stay recorded and a retry starts again at part 3.
+
+A scheduled post can repeat every day, week or month, with an optional end date. Each time an occurrence goes out, the next is created as its own scheduled post, so you can edit or cancel one without touching the rest, or stop the whole series.
+
 It is also an MCP server. Claude, Cursor, Codex and other MCP clients can list accounts, check a post, publish, schedule and confirm delivery. You type credentials into Broadside, so they stay out of the chat.
 
 It runs as one Node process with one SQLite file. There is no queue, no database server and no account with anyone.
@@ -54,7 +58,7 @@ Any Streamable HTTP client works with the same URL and header. A local stdio ser
 { "mcpServers": { "broadside": { "command": "npx", "args": ["tsx", "/path/to/broadside/bin/broadside-mcp.ts"] } } }
 ```
 
-Tools: `list_platforms`, `list_accounts`, `connect_account`, `disconnect_account`, `upload_media`, `list_media`, `check_post`, `create_post`, `get_post`, `list_posts`, `update_post`, `publish_post`, `cancel_post`, `retry_target`, `delete_post`.
+Tools: `list_platforms`, `list_accounts`, `connect_account`, `disconnect_account`, `upload_media`, `list_media`, `check_post`, `create_post`, `get_post`, `list_posts`, `update_post`, `publish_post`, `cancel_post`, `stop_series`, `retry_target`, `delete_post`.
 
 ## REST API
 
@@ -66,6 +70,8 @@ curl http://localhost:3000/api/v1/posts \
   -d '{"content": "Hello", "targets": [{"account_id": "acc_…"}], "publish_at": "2026-12-01T09:00:00+01:00"}'
 ```
 
+Add `"thread": ["second part", "third part"]` for a thread, and `"repeat": {"every": "week", "until": "2027-06-30", "timezone": "Europe/Paris"}` to repeat a scheduled post (`every` is `day`, `week` or `month`; `until` and `timezone` are optional). A post comes back with its `thread`, its `repeat` and `series`, and for each target a `parts` list with the status and url of every part.
+
 | Method and path | Does |
 | --- | --- |
 | `GET /platforms` | Networks, limits and credential fields |
@@ -73,7 +79,7 @@ curl http://localhost:3000/api/v1/posts \
 | `GET, POST /media` · `PATCH, DELETE /media/{id}` | Upload (multipart `file`) or import (`{"url"}`), set alt text |
 | `POST /check` | Dry run against each account's rules |
 | `GET, POST /posts` · `GET, PATCH, DELETE /posts/{id}` | Create (send an `Idempotency-Key` header), read, edit |
-| `POST /posts/{id}/publish` · `/cancel` · `/targets/{targetId}/retry` | Act on a post |
+| `POST /posts/{id}/publish` · `/cancel` · `/targets/{targetId}/retry` | Act on a post. `/cancel` with `{"series": true}` stops a whole repeating series |
 | `GET, POST /keys` · `DELETE /keys/{id}` | API keys |
 
 Responses are `{ "data": … }` or `{ "error": { "code", "message", "details" } }`.
@@ -89,10 +95,12 @@ You connect each account with credentials you create yourself; the app shows the
 Things worth knowing before you rely on a network:
 
 - **These connectors are tested against each network's documented API shapes, not against the live networks.** `npm run verify` exercises Mastodon, Bluesky, Discord, Telegram, Slack and the webhook against local stand-ins; the rest are covered by request-shape tests. Try a new account with one post before scheduling many.
+- **Threads work on 11 networks.** X, Bluesky, Mastodon, Threads, Telegram, Reddit, Lemmy and Nostr publish each part as a reply to the one before. Facebook Pages, Instagram and LinkedIn publish each part as a comment under the post. Some need an extra permission: `pages_manage_engagement` on Facebook, `instagram_manage_comments` on Instagram and `threads_manage_replies` on Threads. Discord, Slack, TikTok, YouTube, Pinterest, DEV and the webhook cannot take a thread. `npm run verify` proves threads against the Mastodon, Bluesky and Telegram stand-ins; the other eight are covered by request-shape tests.
+- **Repeating posts count their dates from the first occurrence.** A monthly post set for the 31st goes out on the last day of shorter months and returns to the 31st. With a time zone the post keeps its local clock time when the clocks change; without one the dates are counted in UTC. Occurrences missed while Broadside was not running are skipped, so the next one is always in the future.
 - **Instagram, Threads, Slack, DEV, Nostr and TikTok photos fetch media from a public URL.** Set `BROADSIDE_PUBLIC_URL` to where this app is reachable from the internet, or attach media by URL.
 - **TikTok and Pinterest restrict unapproved apps:** TikTok posts are private or inbox drafts until the app is audited; Pinterest trial-access pins are visible only to you.
 - **LinkedIn tokens last 60 days** and are pasted by hand, so that account needs reconnecting every two months. Threads tokens are refreshed each time Broadside posts.
-- **Not supported yet:** video on X, LinkedIn and Facebook; threads and reply chains; first comments; stories; analytics; editing or deleting a post after it is published.
+- **Not supported yet:** video on X, LinkedIn and Facebook; media on the later parts of a thread; stories; analytics; editing or deleting a post after it is published.
 
 ## Configuration
 
@@ -140,11 +148,11 @@ To put Broadside on the internet, keep it on `127.0.0.1` and publish it through 
 ## How it is built
 
 - `src/lib/platforms/` holds one connector per network: its credential fields, limits and the HTTP calls that publish. Connectors never touch the database, so each is tested with a fake `fetch`.
-- `src/lib/posts.ts` is the engine: validate, fan out, record a status per target, retry transient failures. A target is claimed with a compare-and-set before it is sent, so two clocks can never post it twice, and a target interrupted mid-send is failed rather than resent.
+- `src/lib/posts.ts` is the engine: validate, fan out, record a status per target, retry transient failures. A target is claimed with a compare-and-set before it is sent, so two clocks can never post it twice, and a target interrupted mid-send is failed rather than resent. A thread is recorded part by part, so a retry continues where it stopped, and the next occurrence of a repeating post is created under the same kind of claim, exactly once.
 - `src/lib/mcp.ts` defines the tools once; `/mcp` (HTTP) and `bin/broadside-mcp.ts` (stdio) both serve them.
 - `src/lib/scheduler.ts` is an in-process clock started with the server.
 
-Adding a network is one object that implements `Connector` in `src/lib/platforms/types.ts`, plus a line in the registry and a request-shape test.
+Adding a network is one object that implements `Connector` in `src/lib/platforms/types.ts`, plus a line in the registry and a request-shape test. Give it a `reply` function if the network can answer its own post, and it takes threads.
 
 ## Design
 

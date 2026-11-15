@@ -49,3 +49,29 @@ export function problems(c: Fits, text: string, media: MediaShape[]): string[] {
   }
   return out;
 }
+
+export type ThreadFits = Fits & { threads: boolean; noThread?: string };
+
+/** The most parts a thread may have after its main post. */
+export const MAX_THREAD_PARTS = 24;
+
+/**
+ * Reasons the parts after the main post cannot go to this network. The main
+ * post is part 1, so the first of `parts` is part 2. A network that cannot
+ * reply to its own post is refused outright; nothing is dropped quietly.
+ * `whileWriting` is for the composer, where a part just added is empty until
+ * it is written and that is not yet a mistake.
+ */
+export function threadProblems(c: ThreadFits, parts: string[], whileWriting = false): string[] {
+  if (!parts.length) return [];
+  if (!c.threads) return [c.noThread ?? `${c.name} cannot post a thread.`];
+  const out: string[] = [];
+  if (parts.length > MAX_THREAD_PARTS) out.push(`A thread can have ${MAX_THREAD_PARTS + 1} parts; this has ${parts.length + 1}.`);
+  const max = c.limits.maxReplyChars ?? c.limits.maxChars;
+  parts.forEach((part, i) => {
+    if (!part.trim() && !whileWriting) out.push(`Part ${i + 2} of the thread is empty.`);
+    const length = measure(part, c.limits.count);
+    if (length > max) out.push(`${c.name} allows ${max} characters in a reply; part ${i + 2} is ${length}.`);
+  });
+  return out;
+}

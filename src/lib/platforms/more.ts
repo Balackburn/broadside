@@ -87,7 +87,7 @@ export const reddit: Connector = {
     { key: "subreddit", label: "Subreddit", kind: "text", placeholder: "test" },
   ],
   options: [{ key: "title", label: "Title", kind: "text" }],
-  limits: { maxChars: 40000, count: "graphemes", maxImages: 0, maxVideos: 0, requiresMedia: false },
+  limits: { maxChars: 40000, count: "graphemes", maxImages: 0, maxVideos: 0, requiresMedia: false, maxReplyChars: 10000 },
 
   async verify(c, ctx) {
     await redditToken(c, ctx);
@@ -111,6 +111,25 @@ export const reddit: Connector = {
       throw new PublishError(`Reddit refused the post: ${result.json.errors.map((e) => e.join(" ")).join("; ") || "no details"}`);
     }
     return { id: result.json.data.name, url: result.json.data.url };
+  },
+
+  async reply(input, c, ctx) {
+    const token = await redditToken(c, ctx);
+    const result = await call<{ json: { errors: string[][]; data?: { things?: { data: { name: string; permalink?: string } }[] } } }>(
+      ctx,
+      "Reddit",
+      "https://oauth.reddit.com/api/comment",
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "user-agent": agent(c) },
+        body: formBody({ api_type: "json", thing_id: input.parent.id, text: input.text }),
+      },
+    );
+    const comment = result.json.data?.things?.[0]?.data;
+    if (result.json.errors.length || !comment) {
+      throw new PublishError(`Reddit refused the comment: ${result.json.errors.map((e) => e.join(" ")).join("; ") || "no details"}`);
+    }
+    return { id: comment.name, url: comment.permalink ? `https://www.reddit.com${comment.permalink}` : undefined };
   },
 };
 
@@ -212,6 +231,19 @@ export const lemmy: Connector = {
     );
     return { id: String(made.post_view.post.id), url: `${base}/post/${made.post_view.post.id}` };
   },
+
+  async reply(input, c, ctx) {
+    const base = c.instance.replace(/\/+$/, "");
+    const jwt = await lemmyLogin(c, ctx);
+    // Posts and comments are numbered separately, so the first reply names only the post and later ones name the comment above them.
+    const made = await call<{ comment_view: { comment: { id: number } } }>(
+      ctx,
+      "Lemmy",
+      `${base}/api/v3/comment`,
+      json({ content: input.text, post_id: Number(input.root.id), parent_id: input.index > 1 ? Number(input.parent.id) : undefined }, { authorization: `Bearer ${jwt}` }),
+    );
+    return { id: String(made.comment_view.comment.id), url: `${base}/comment/${made.comment_view.comment.id}` };
+  },
 };
 
 async function lemmyLogin(c: Credentials, ctx: Context): Promise<string> {
@@ -243,9 +275,8 @@ export const noteId = (id: string) => bech32.encode("note", bech32.toWords(Buffe
 export const npub = (secret: Uint8Array) => bech32.encode("npub", bech32.toWords(schnorr.getPublicKey(secret)), 200);
 
 /** A signed kind-1 text note, as NIP-01 defines it. */
-export function nostrEvent(secret: Uint8Array, content: string, createdAt = Math.floor(Date.now() / 1000)) {
+export function nostrEvent(secret: Uint8Array, content: string, createdAt = Math.floor(Date.now() / 1000), tags: string[][] = []) {
   const pubkey = hex(schnorr.getPublicKey(secret));
-  const tags: string[][] = [];
   const id = createHash("sha256").update(JSON.stringify([0, pubkey, createdAt, 1, tags, content])).digest("hex");
   const sig = hex(schnorr.sign(Buffer.from(id, "hex"), secret));
   return { id, pubkey, created_at: createdAt, kind: 1, tags, content, sig };
@@ -295,21 +326,40 @@ export const nostr: Connector = {
 
   async publish(input, c) {
     const content = [input.text, ...input.media.map((m) => m.publicUrl)].filter(Boolean).join("\n");
-    const event = nostrEvent(nostrSecret(c.private_key), content);
-    // A relay address is user-typed like any other, so it gets the same private-network check before a socket is opened.
-    const results = await Promise.allSettled(
-      relays(c).map(async (url) => {
-        await assertPublicUrl(new URL(url.replace(/^ws/, "http")));
-        return sendToRelay(url, event);
-      }),
-    );
-    if (!results.some((r) => r.status === "fulfilled")) {
-      const reasons = results.map((r, i) => `${relays(c)[i]}: ${(r as PromiseRejectedResult).reason.message}`).join("; ");
-      throw new PublishError(`No relay accepted the note (${reasons}).`, true);
-    }
-    return { id: event.id, url: `https://njump.me/${noteId(event.id)}` };
+    return broadcast(c, nostrEvent(nostrSecret(c.private_key), content));
+  },
+
+  async reply(input, c) {
+    const secret = nostrSecret(c.private_key);
+    return broadcast(c, nostrEvent(secret, input.text, undefined, replyTags(input.root.id, input.index > 1 ? input.parent.id : null, hex(schnorr.getPublicKey(secret)))));
   },
 };
+
+/**
+ * NIP-10 marked tags: the thread's first note is the root, and a note that
+ * answers a later one names it as the reply. The p tag names the author being
+ * answered, which here is always the same key.
+ */
+export function replyTags(root: string, parent: string | null, author: string): string[][] {
+  const tags = [["e", root, "", "root"]];
+  if (parent) tags.push(["e", parent, "", "reply"]);
+  return [...tags, ["p", author]];
+}
+
+async function broadcast(c: Credentials, event: ReturnType<typeof nostrEvent>) {
+  // A relay address is user-typed like any other, so it gets the same private-network check before a socket is opened.
+  const results = await Promise.allSettled(
+    relays(c).map(async (url) => {
+      await assertPublicUrl(new URL(url.replace(/^ws/, "http")));
+      return sendToRelay(url, event);
+    }),
+  );
+  if (!results.some((r) => r.status === "fulfilled")) {
+    const reasons = results.map((r, i) => `${relays(c)[i]}: ${(r as PromiseRejectedResult).reason.message}`).join("; ");
+    throw new PublishError(`No relay accepted the note (${reasons}).`, true);
+  }
+  return { id: event.id, url: `https://njump.me/${noteId(event.id)}` };
+}
 
 const relays = (c: Credentials) => (c.relays || "").split(",").map((r) => r.trim()).filter((r) => /^wss?:\/\//.test(r));
 

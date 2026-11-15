@@ -3,15 +3,26 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useMemo, useRef, useState } from "react";
-import { measure, problems } from "@/lib/platforms/measure";
+import { measure, problems, threadProblems } from "@/lib/platforms/measure";
 import type { Limits } from "@/lib/platforms/types";
 import { api, Icon, Stamp, Status, Tabs, useHydrated, useToast, when } from "./ui";
 
-export type ComposerAccount = { id: string; platform: string; name: string; handle: string; limits: Limits };
+/** `threads` says whether the network can take parts after the main post; `noThread` is its own reason when it cannot. */
+export type ComposerAccount = { id: string; platform: string; name: string; handle: string; limits: Limits; threads: boolean; noThread?: string };
 type Media = { id: string; type: "image" | "video"; url: string; public_url: string | null; filename: string; alt: string | null };
-type Target = { id: string; account_id: string; platform: string; handle: string; status: string; error: string | null; url: string | null };
-type Post = { id: string; status: string; publish_at: string | null; targets: Target[] };
+type Part = { part: number; status: string; url: string | null };
+type Target = { id: string; account_id: string; platform: string; handle: string; status: string; error: string | null; url: string | null; parts: Part[] };
+type Every = "day" | "week" | "month";
+type Post = { id: string; status: string; publish_at: string | null; repeat: { every: Every } | null; targets: Target[] };
 type Mode = "now" | "later" | "draft";
+type Repeat = "never" | Every;
+
+const REPEATS: { value: Repeat; label: string }[] = [
+  { value: "never", label: "Never" },
+  { value: "day", label: "Daily" },
+  { value: "week", label: "Weekly" },
+  { value: "month", label: "Monthly" },
+];
 
 /** A draft or scheduled post opened for editing. */
 export type ComposerInitial = {
@@ -21,6 +32,8 @@ export type ComposerInitial = {
   draft: boolean;
   targets: { account_id: string; content_override: string | null }[];
   media: Media[];
+  thread: string[];
+  repeat: { every: Every; until: string | null } | null;
 };
 
 const localInput = (date: Date) => new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
@@ -39,6 +52,10 @@ export function Composer({ accounts, initial }: { accounts: ComposerAccount[]; i
   const [media, setMedia] = useState<Media[]>(initial?.media ?? []);
   const [mode, setMode] = useState<Mode>(initial ? (initial.draft ? "draft" : initial.publish_at ? "later" : "now") : "now");
   const [at, setAt] = useState(() => localInput(initial?.publish_at ? new Date(initial.publish_at) : new Date(Date.now() + 3600_000)));
+  // Thread parts carry their own key so removing one keeps the others' text fields in place.
+  const [thread, setThread] = useState<{ key: number; text: string }[]>(() => (initial?.thread ?? []).map((part, key) => ({ key, text: part })));
+  const [repeat, setRepeat] = useState<Repeat>(initial?.repeat?.every ?? "never");
+  const [until, setUntil] = useState(() => (initial?.repeat?.until ? localInput(new Date(initial.repeat.until)).slice(0, 10) : ""));
   const [busy, setBusy] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [result, setResult] = useState<Post | null>(null);
@@ -48,10 +65,11 @@ export function Composer({ accounts, initial }: { accounts: ComposerAccount[]; i
   const chosen = accounts.filter((a) => selected.includes(a.id));
   const shapes = useMemo(() => media.map((m) => ({ type: m.type, hasPublicUrl: Boolean(m.public_url) })), [media]);
   // An untouched composer is not an error: problems appear once there is something to measure.
-  const pristine = !text.trim() && media.length === 0 && Object.keys(overrides).length === 0;
+  const parts = useMemo(() => thread.map((part) => part.text), [thread]);
+  const pristine = !text.trim() && media.length === 0 && Object.keys(overrides).length === 0 && parts.every((part) => !part.trim());
   const issues = useMemo(
-    () => Object.fromEntries(chosen.map((a) => [a.id, mode === "draft" || pristine ? [] : problems(a, overrides[a.id] ?? text, shapes)])),
-    [chosen, overrides, text, shapes, mode, pristine],
+    () => Object.fromEntries(chosen.map((a) => [a.id, mode === "draft" || pristine ? [] : [...problems(a, overrides[a.id] ?? text, shapes), ...threadProblems(a, parts, true)]])),
+    [chosen, overrides, text, shapes, mode, pristine, parts],
   );
   const blocked = chosen.filter((a) => issues[a.id].length > 0);
 
@@ -75,9 +93,17 @@ export function Composer({ accounts, initial }: { accounts: ComposerAccount[]; i
     }
   }
 
+  const keepsSchedule = mode === "draft" && Boolean(initial?.draft);
+  // An untouched time goes back exactly as it was stored, so a repeating post is not re-dated by opening it.
+  const publishAt = () => (initial?.publish_at && at === localInput(new Date(initial.publish_at)) ? initial.publish_at : new Date(at).toISOString());
+  const repeatRule = () =>
+    repeat === "never" ? null : { every: repeat, until: until ? new Date(`${until}T23:59:59.999`).toISOString() : null, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone };
+
   async function submit() {
     if (!chosen.length) return show("Choose at least one account to post to.");
     if (pristine) return show("Write something first.");
+    const blank = parts.findIndex((part) => !part.trim());
+    if (blank >= 0) return show(`Part ${blank + 2} of the thread is empty. Write it or remove it.`);
     if (blocked.length) {
       setShake((n) => n + 1);
       return show(`${blocked.map((a) => a.name).join(", ")} can’t take this as written. Fix the marked sheets.`);
@@ -90,8 +116,12 @@ export function Composer({ accounts, initial }: { accounts: ComposerAccount[]; i
         body: JSON.stringify({
           content: text,
           targets: chosen.map((a) => ({ account_id: a.id, content_override: overrides[a.id] ?? undefined })),
+          thread: parts,
           media_ids: media.map((m) => m.id),
-          publish_at: mode === "later" ? new Date(at).toISOString() : initial ? null : undefined,
+          // A draft that came with a time keeps it when it is saved as a draft again.
+          publish_at: mode === "later" ? publishAt() : keepsSchedule ? undefined : initial ? null : undefined,
+          // Repeat is chosen beside the time. Sending a repeating post now, or parking it as a draft, leaves its series as it was.
+          repeat: mode === "later" ? repeatRule() : undefined,
           draft: mode === "draft",
         }),
       });
@@ -110,6 +140,9 @@ export function Composer({ accounts, initial }: { accounts: ComposerAccount[]; i
     setText("");
     setOverrides({});
     setMedia([]);
+    setThread([]);
+    setRepeat("never");
+    setUntil("");
     setMode("now");
   }
 
@@ -120,6 +153,7 @@ export function Composer({ accounts, initial }: { accounts: ComposerAccount[]; i
     return (
       <div className="mx-auto max-w-2xl">
         <h1 className="heading rise text-5xl">{heading}</h1>
+        {result.repeat && result.status !== "draft" ? <p className="note rise mt-3">{`It repeats every ${result.repeat.every}. Each occurrence shows up under Posts as its own post.`}</p> : null}
         <ul className="mt-8 space-y-2">
           {result.targets.map((t, i) => (
             <li key={t.id} className="sheet rise" style={{ "--i": i + 1 } as React.CSSProperties}>
@@ -137,6 +171,23 @@ export function Composer({ accounts, initial }: { accounts: ComposerAccount[]; i
                   ) : null}
                 </span>
               </div>
+              {t.parts.length > 1 && t.status !== "scheduled" && t.status !== "draft" ? (
+                <ol className="mt-3 space-y-1">
+                  {t.parts.map((part) => (
+                    <li key={part.part} className="flex flex-wrap items-center justify-between gap-3 text-sm">
+                      <span className="text-ink-2">{`Part ${part.part}`}</span>
+                      <span className="flex items-center gap-4">
+                        <Status status={part.status} />
+                        {part.url ? (
+                          <a className="link inline-flex items-center gap-1" href={part.url} target="_blank" rel="noreferrer">
+                            Open <Icon name="out" size={14} />
+                          </a>
+                        ) : null}
+                      </span>
+                    </li>
+                  ))}
+                </ol>
+              ) : null}
               {t.error ? <p className="mt-2 text-sm text-bad">{t.error}</p> : null}
             </li>
           ))}
@@ -218,6 +269,32 @@ export function Composer({ accounts, initial }: { accounts: ComposerAccount[]; i
           </div>
         </div>
 
+        <div className="mt-6">
+          {thread.map((part, i) => (
+            <div key={part.key} className="mb-4">
+              <div className="flex items-center justify-between gap-3">
+                <label className="label" htmlFor={`post-part-${part.key}`}>
+                  {`Part ${i + 2}`}
+                </label>
+                <button type="button" className="btn btn-bare btn-sm mb-1" onClick={() => setThread((all) => all.filter((x) => x.key !== part.key))}>
+                  Remove
+                </button>
+              </div>
+              <textarea
+                id={`post-part-${part.key}`}
+                className="field min-h-24 resize-y text-[15px] leading-snug"
+                value={part.text}
+                onChange={(e) => setThread((all) => all.map((x) => (x.key === part.key ? { ...x, text: e.target.value } : x)))}
+                placeholder="Goes out as a reply to the part above."
+              />
+            </div>
+          ))}
+          <button type="button" className="btn btn-quiet btn-sm" onClick={() => setThread((all) => [...all, { key: (all.at(-1)?.key ?? -1) + 1, text: "" }])}>
+            <Icon name="plus" size={16} /> Add to thread
+          </button>
+          {thread.length === 0 ? <span className="note ml-3">Add a first comment or a full thread.</span> : null}
+        </div>
+
         <div className="mt-8 flex flex-wrap items-end gap-4">
           <div>
             <p className="label">When</p>
@@ -239,6 +316,20 @@ export function Composer({ accounts, initial }: { accounts: ComposerAccount[]; i
                 Date and time
               </label>
               <input id="post-at" type="datetime-local" className="field w-auto" value={at} min={localInput(new Date())} onChange={(e) => setAt(e.target.value)} />
+            </div>
+          ) : null}
+          {mode === "later" && hydrated ? (
+            <div>
+              <p className="label">Repeat</p>
+              <Tabs label="How often to repeat" value={repeat} onChange={setRepeat} options={REPEATS} />
+            </div>
+          ) : null}
+          {mode === "later" && hydrated && repeat !== "never" ? (
+            <div>
+              <label className="label" htmlFor="post-until">
+                Until (optional)
+              </label>
+              <input id="post-until" type="date" className="field w-auto" value={until} min={at.slice(0, 10)} onChange={(e) => setUntil(e.target.value)} />
             </div>
           ) : null}
           <button type="button" className="btn btn-signal btn-lg ml-auto" onClick={submit} disabled={busy || uploading}>
@@ -277,6 +368,23 @@ export function Composer({ accounts, initial }: { accounts: ComposerAccount[]; i
                 ) : (
                   <textarea className="field mt-3 min-h-24 text-[15px] leading-snug" aria-label={`Version for ${a.handle}`} value={own} onChange={(e) => setOverrides((o) => ({ ...o, [a.id]: e.target.value }))} />
                 )}
+                {a.threads
+                  ? thread.map((part, i) => {
+                      const size = measure(part.text, a.limits.count);
+                      const max = a.limits.maxReplyChars ?? a.limits.maxChars;
+                      return (
+                        <div key={part.key} className="mt-3 pt-3" style={{ borderTop: "1px solid var(--line)" }}>
+                          <div className="flex items-center justify-between gap-3">
+                            <span className="note">{`Part ${i + 2}`}</span>
+                            <span className="num flex-none text-sm font-medium" style={{ color: size > max ? "var(--bad)" : "var(--ink-3)" }}>
+                              {size} / {max}
+                            </span>
+                          </div>
+                          <p className="mt-1 line-clamp-3 whitespace-pre-wrap text-[15px] leading-snug">{part.text || <span className="text-ink-3">Nothing written yet.</span>}</p>
+                        </div>
+                      );
+                    })
+                  : null}
                 {found.map((problem) => (
                   <p key={problem} className="mt-2 text-sm font-medium text-bad">
                     {problem}

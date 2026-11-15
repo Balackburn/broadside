@@ -81,6 +81,7 @@ const WORDS: Record<string, string> = {
   pending: "Sending",
   publishing: "Sending",
   retrying: "Retrying",
+  waiting: "Waiting",
   published: "Published",
   partial: "Partly published",
   failed: "Failed",

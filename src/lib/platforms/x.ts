@@ -89,4 +89,12 @@ export const x: Connector = {
     });
     return { id: tweet.data.id, url: `https://x.com/${c.username || "i"}/status/${tweet.data.id}` };
   },
+
+  async reply(input, c, ctx) {
+    const tweet = await signed<{ data: { id: string } }>(ctx, c, "POST", `${API}/tweets`, {
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: input.text, reply: { in_reply_to_tweet_id: input.parent.id } }),
+    });
+    return { id: tweet.data.id, url: `https://x.com/${c.username || "i"}/status/${tweet.data.id}` };
+  },
 };

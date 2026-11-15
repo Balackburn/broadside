@@ -32,7 +32,10 @@ export const connectors: Connector[] = [
 
 export const connector = (id: string): Connector | undefined => connectors.find((c) => c.id === id);
 
-export { measure, problems, type MediaShape } from "./measure";
+export { measure, problems, threadProblems, type MediaShape } from "./measure";
+
+/** What the length and thread rules need to know about a network. */
+export const fits = (c: Connector) => ({ name: c.name, limits: c.limits, threads: Boolean(c.reply), noThread: c.noThread });
 
 /** What the UI and agents need to know about a network, without its code. */
 export function describe(c: Connector) {
@@ -44,6 +47,8 @@ export function describe(c: Connector) {
     fields: c.fields.filter((f) => !f.hidden),
     options: c.options ?? [],
     limits: c.limits,
+    // True when a post to this network may carry a thread (extra parts published as replies or comments).
+    threads: Boolean(c.reply),
     // Present when the network connects by signing in; the callback path is what you register with the network.
     oauth: c.oauth ? { callback_path: `/oauth/${c.id}/callback`, scopes: c.oauth.scopes } : null,
   };

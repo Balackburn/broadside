@@ -44,6 +44,22 @@ export type PublishResult = {
   url?: string;
   /** Refreshed credentials to persist (rotated tokens). */
   credentials?: Credentials;
+  /** Identifiers a later reply needs beyond the id, such as Bluesky's cid. Kept with the target. */
+  ref?: Record<string, string>;
+};
+
+/** What a later part of a thread needs to know about a part already published. */
+export type PartRef = { id: string; url?: string; ref?: Record<string, string> };
+
+export type ReplyInput = {
+  text: string;
+  /** Which part this is, counting the main post as 0. The first reply is 1, and its parent is the root. */
+  index: number;
+  /** The main post the thread hangs from. */
+  root: PartRef;
+  /** The part published just before this one. */
+  parent: PartRef;
+  options: Record<string, unknown>;
 };
 
 export type Profile = {
@@ -64,6 +80,8 @@ export type Limits = {
   requiresMedia: boolean;
   /** Media must be reachable at a public URL (the network pulls it). */
   pullsMedia?: boolean;
+  /** The limit for a reply or comment, where the network sets one apart from the post's. */
+  maxReplyChars?: number;
 };
 
 export type OptionSpec = {
@@ -86,6 +104,14 @@ export type Connector = {
   limits: Limits;
   verify: (credentials: Credentials, ctx: Context) => Promise<Profile>;
   publish: (input: PublishInput, credentials: Credentials, ctx: Context) => Promise<PublishResult>;
+  /**
+   * Publishes one later part of a thread under a post this connector published.
+   * Networks with reply chains answer `parent`; networks with comments add one
+   * to `root`. A connector without it is refused a post that carries a thread.
+   */
+  reply?: (input: ReplyInput, credentials: Credentials, ctx: Context) => Promise<PublishResult>;
+  /** Why this network cannot take a thread, in its own words, when it has no `reply`. */
+  noThread?: string;
 };
 
 /** An error whose message is safe and useful to show next to a target. */

@@ -41,6 +41,7 @@ export const threads: Connector = {
     "Create a Meta app with the Threads use case and add your account as a Threads tester.",
     "In the use case's settings open the User token generator and generate a token for your account.",
     "Paste that long-lived token here. It lasts 60 days; Broadside refreshes it each time it posts.",
+    "To post threads, the token also needs the threads_manage_replies permission.",
   ],
   fields: [{ key: "access_token", label: "Access token", kind: "secret" }],
   limits: { maxChars: 500, count: "graphemes", maxImages: 10, maxVideos: 1, requiresMedia: false, pullsMedia: true },
@@ -99,6 +100,23 @@ export const threads: Connector = {
       credentials: fresh.access_token ? { ...c, access_token: fresh.access_token } : undefined,
     };
   },
+
+  async reply(input, c, ctx) {
+    const token = c.access_token;
+    const made = await call<{ id: string }>(
+      ctx,
+      "Threads",
+      `${TH}/${c.user_id}/threads`,
+      form({ media_type: "TEXT", text: input.text, reply_to_id: input.parent.id, access_token: token }),
+    );
+    const published = await call<{ id: string }>(ctx, "Threads", `${TH}/${c.user_id}/threads_publish`, form({ creation_id: made.id, access_token: token }));
+    const link = await call<{ permalink?: string }>(
+      ctx,
+      "Threads",
+      `${TH}/${published.id}?fields=permalink&access_token=${encodeURIComponent(token)}`,
+    ).catch(() => ({ permalink: undefined }));
+    return { id: published.id, url: link.permalink };
+  },
 };
 
 /* Facebook Page ----------------------------------------------------------- */
@@ -113,12 +131,13 @@ export const facebook: Connector = {
     "Create a Meta app, then in the Graph API Explorer request pages_manage_posts and pages_read_engagement.",
     "Exchange for a long-lived user token and call /me/accounts to read your Page's id and Page access token.",
     "Paste the Page id and its Page access token here. A Page token made from a long-lived user token does not expire.",
+    "To post threads, which go out as comments under the post, also request pages_manage_engagement.",
   ],
   fields: [
     { key: "page_id", label: "Page id", kind: "text" },
     { key: "access_token", label: "Page access token", kind: "secret" },
   ],
-  limits: { maxChars: 63206, count: "graphemes", maxImages: 10, maxVideos: 0, requiresMedia: false },
+  limits: { maxChars: 63206, count: "graphemes", maxImages: 10, maxVideos: 0, requiresMedia: false, maxReplyChars: 8000 },
 
   async verify(c, ctx) {
     const page = await call<{ name: string; picture?: { data?: { url?: string } } }>(
@@ -150,6 +169,12 @@ export const facebook: Connector = {
     );
     return { id: post.id, url: post.permalink_url ?? `https://www.facebook.com/${post.id}` };
   },
+
+  // Each later part is a comment on the post itself: Facebook nests comments one level deep, so a chain of replies would not hold.
+  async reply(input, c, ctx) {
+    const comment = await call<{ id: string }>(ctx, "Facebook", `${FB}/${input.root.id}/comments`, form({ message: input.text, access_token: c.access_token }));
+    return { id: comment.id };
+  },
 };
 
 /* Instagram --------------------------------------------------------------- */
@@ -162,6 +187,7 @@ export const instagram: Connector = {
     "Switch the account to Professional (Business or Creator) and link it to a Facebook Page.",
     "With a Meta app, request instagram_basic and instagram_content_publish for a user that manages that Page.",
     "Paste the Instagram account id (from /{page-id}?fields=instagram_business_account) and the access token.",
+    "To post threads, which go out as comments under the post, also request instagram_manage_comments.",
   ],
   fields: [
     { key: "ig_user_id", label: "Instagram account id", kind: "text" },
@@ -209,5 +235,11 @@ export const instagram: Connector = {
       `${FB}/${published.id}?fields=permalink&access_token=${encodeURIComponent(token)}`,
     ).catch(() => ({ permalink: undefined }));
     return { id: published.id, url: link.permalink };
+  },
+
+  // Each later part is a comment on the media: Instagram has no reply chain for an account's own posts.
+  async reply(input, c, ctx) {
+    const comment = await call<{ id: string }>(ctx, "Instagram", `${FB}/${input.root.id}/comments`, form({ message: input.text, access_token: c.access_token }));
+    return { id: comment.id };
   },
 };

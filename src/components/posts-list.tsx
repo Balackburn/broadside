@@ -5,8 +5,21 @@ import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { api, Icon, Stamp, Status, Tabs, Time, useToast } from "./ui";
 
-type Target = { id: string; platform: string; handle: string; status: string; error: string | null; url: string | null; content_override: string | null };
-type Post = { id: string; content: string; status: string; publish_at: string | null; created_at: string; origin: string; targets: Target[]; media: { id: string }[] };
+type Part = { part: number; status: string; url: string | null };
+type Target = { id: string; platform: string; handle: string; status: string; error: string | null; url: string | null; content_override: string | null; parts: Part[] };
+type Post = {
+  id: string;
+  content: string;
+  thread: string[];
+  status: string;
+  publish_at: string | null;
+  created_at: string;
+  origin: string;
+  repeat: { every: "day" | "week" | "month"; until: string | null } | null;
+  series: { id: string; active: boolean } | null;
+  targets: Target[];
+  media: { id: string }[];
+};
 type Filter = "all" | "scheduled" | "published" | "failed" | "draft";
 
 const FILTERS: { value: Filter; label: string }[] = [
@@ -30,10 +43,10 @@ export function PostsList({ posts, focus }: { posts: Post[]; focus?: string }) {
   const [busy, setBusy] = useState<string | null>(null);
   const shown = posts.filter((p) => matches(p, filter));
 
-  async function act(key: string, path: string, method: string, done: string) {
+  async function act(key: string, path: string, method: string, done: string, body?: unknown) {
     setBusy(key);
     try {
-      await api(path, { method });
+      await api(path, { method, body: body === undefined ? undefined : JSON.stringify(body) });
       show(done);
       router.refresh();
     } catch (error) {
@@ -67,6 +80,7 @@ export function PostsList({ posts, focus }: { posts: Post[]; focus?: string }) {
           {shown.map((post) => {
             const expanded = open === post.id;
             const editable = post.status === "scheduled" || post.status === "draft";
+            const series = post.series ? posts.filter((p) => p.series?.id === post.series?.id).sort((a, b) => (a.publish_at ?? a.created_at).localeCompare(b.publish_at ?? b.created_at)) : [];
             return (
               <li key={post.id} className="panel overflow-hidden">
                 <button type="button" className="row flex w-full items-center gap-4 p-4 text-left" aria-expanded={expanded} onClick={() => setOpen(expanded ? null : post.id)}>
@@ -78,6 +92,8 @@ export function PostsList({ posts, focus }: { posts: Post[]; focus?: string }) {
                       </span>
                       <span>{ORIGIN[post.origin] ?? post.origin}</span>
                       {post.media.length ? <span>{post.media.length} media</span> : null}
+                      {post.thread.length ? <span>{`Thread of ${post.thread.length + 1}`}</span> : null}
+                      {post.repeat ? <span>{`Repeats every ${post.repeat.every}`}</span> : null}
                     </span>
                   </span>
                   <span className="hidden flex-none items-center sm:flex" aria-hidden="true">
@@ -93,6 +109,16 @@ export function PostsList({ posts, focus }: { posts: Post[]; focus?: string }) {
                 </button>
                 {expanded ? (
                   <div className="bg-paper-2 p-4">
+                    {post.thread.length ? (
+                      <ol className="mb-3 space-y-2">
+                        {post.thread.map((text, i) => (
+                          <li key={i} className="rounded-md bg-paper p-3">
+                            <span className="note">{`Part ${i + 2}`}</span>
+                            <p className="mt-1 whitespace-pre-wrap text-[15px] leading-snug">{text}</p>
+                          </li>
+                        ))}
+                      </ol>
+                    ) : null}
                     <ul className="space-y-2">
                       {post.targets.map((t) => (
                         <li key={t.id} className="rounded-md bg-paper p-3">
@@ -116,10 +142,66 @@ export function PostsList({ posts, focus }: { posts: Post[]; focus?: string }) {
                               ) : null}
                             </span>
                           </div>
+                          {/* Until a thread starts going out, every part has its target's status and the list would only repeat it. */}
+                          {t.parts.length > 1 && t.status !== "scheduled" && t.status !== "draft" ? (
+                            <ol className="mt-2 space-y-1">
+                              {t.parts.map((part) => (
+                                <li key={part.part} className="flex flex-wrap items-center justify-between gap-3 text-sm">
+                                  <span className="text-ink-2">{`Part ${part.part}`}</span>
+                                  <span className="flex items-center gap-3">
+                                    <Status status={part.status} />
+                                    {part.url ? (
+                                      <a className="link inline-flex items-center gap-1" href={part.url} target="_blank" rel="noreferrer">
+                                        Open <Icon name="out" size={14} />
+                                      </a>
+                                    ) : null}
+                                  </span>
+                                </li>
+                              ))}
+                            </ol>
+                          ) : null}
                           {t.error ? <p className="mt-2 text-sm text-bad">{t.error}</p> : null}
                         </li>
                       ))}
                     </ul>
+                    {post.series ? (
+                      <div className="mt-3 rounded-md bg-paper p-3">
+                        <div className="flex flex-wrap items-center justify-between gap-3">
+                          <span className="font-medium">
+                            {post.repeat ? `Repeats every ${post.repeat.every}` : "Repeating series"}
+                            {post.repeat?.until ? (
+                              <span className="note">
+                                {" "}
+                                until <Time iso={post.repeat.until} />
+                              </span>
+                            ) : null}
+                          </span>
+                          {post.series.active ? (
+                            <button
+                              type="button"
+                              className="btn btn-quiet btn-sm"
+                              disabled={busy === post.id}
+                              onClick={() => act(post.id, `/posts/${post.id}/cancel`, "POST", "Stopped. Nothing more will go out from this series.", { series: true })}
+                            >
+                              Stop repeating
+                            </button>
+                          ) : (
+                            <span className="note">Ended</span>
+                          )}
+                        </div>
+                        <ol className="mt-2 space-y-1">
+                          {series.map((p) => (
+                            <li key={p.id} className="flex flex-wrap items-center justify-between gap-3 text-sm">
+                              <span className={p.id === post.id ? "num font-medium" : "num text-ink-2"}>
+                                <Time iso={p.publish_at ?? p.created_at} />
+                                {p.id === post.id ? " (this post)" : ""}
+                              </span>
+                              <Status status={p.status} />
+                            </li>
+                          ))}
+                        </ol>
+                      </div>
+                    ) : null}
                     <div className="mt-3 flex flex-wrap gap-2">
                       {editable ? (
                         <Link className="btn btn-sm" href={`/app?edit=${post.id}`}>
@@ -132,8 +214,13 @@ export function PostsList({ posts, focus }: { posts: Post[]; focus?: string }) {
                         </button>
                       ) : null}
                       {editable ? (
-                        <button type="button" className="btn btn-quiet btn-sm" disabled={busy === post.id} onClick={() => act(post.id, `/posts/${post.id}/cancel`, "POST", "Cancelled. It will not go out.")}>
-                          Cancel
+                        <button
+                          type="button"
+                          className="btn btn-quiet btn-sm"
+                          disabled={busy === post.id}
+                          onClick={() => act(post.id, `/posts/${post.id}/cancel`, "POST", post.repeat && post.status === "scheduled" ? "Cancelled this one. The series carries on." : "Cancelled. It will not go out.")}
+                        >
+                          {post.repeat && post.status === "scheduled" ? "Cancel this one" : "Cancel"}
                         </button>
                       ) : null}
                       <button

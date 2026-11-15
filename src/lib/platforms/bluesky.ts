@@ -1,4 +1,4 @@
-import { call, images, json, PublishError, type Connector, type Context, type Credentials } from "./types";
+import { call, images, json, PublishError, type Connector, type Context, type Credentials, type PartRef, type PublishResult } from "./types";
 
 type Session = { accessJwt: string; did: string; handle: string };
 
@@ -80,13 +80,28 @@ export const bluesky: Connector = {
       facets: facets(input.text),
     };
     if (uploaded.length) record.embed = { $type: "app.bsky.embed.images", images: uploaded };
-    const created = await call<{ uri: string }>(
-      ctx,
-      "Bluesky",
-      `${pds(c)}/xrpc/com.atproto.repo.createRecord`,
-      json({ repo: s.did, collection: "app.bsky.feed.post", record }, auth),
-    );
-    const rkey = created.uri.split("/").pop();
-    return { id: created.uri, url: `https://bsky.app/profile/${s.handle}/post/${rkey}` };
+    return create(s, record, c, ctx);
+  },
+
+  async reply(input, c, ctx) {
+    // A reply names both ends of the thread by uri and cid, so a part published without a cid cannot be answered.
+    const strong = (part: PartRef) => {
+      if (!part.ref?.cid) throw new PublishError("Bluesky did not return a cid for the earlier part, which a reply must quote.");
+      return { uri: part.id, cid: part.ref.cid };
+    };
+    const reply = { root: strong(input.root), parent: strong(input.parent) };
+    const s = await session(c, ctx);
+    return create(s, { $type: "app.bsky.feed.post", text: input.text, createdAt: new Date().toISOString(), facets: facets(input.text), reply }, c, ctx);
   },
 };
+
+async function create(s: Session, record: Record<string, unknown>, c: Credentials, ctx: Context): Promise<PublishResult> {
+  const created = await call<{ uri: string; cid?: string }>(
+    ctx,
+    "Bluesky",
+    `${pds(c)}/xrpc/com.atproto.repo.createRecord`,
+    json({ repo: s.did, collection: "app.bsky.feed.post", record }, { authorization: `Bearer ${s.accessJwt}` }),
+  );
+  const rkey = created.uri.split("/").pop();
+  return { id: created.uri, url: `https://bsky.app/profile/${s.handle}/post/${rkey}`, ref: created.cid ? { cid: created.cid } : undefined };
+}

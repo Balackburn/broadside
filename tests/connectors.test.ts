@@ -1,10 +1,10 @@
 import { schnorr } from "@noble/curves/secp256k1.js";
-import { describe, expect, it } from "vitest";
-import { connector, connectors, measure, problems } from "@/lib/platforms";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { connector, connectors, fits, measure, problems, threadProblems } from "@/lib/platforms";
 import { facets } from "@/lib/platforms/bluesky";
 import { apiVersion, escapeLittleText } from "@/lib/platforms/linkedin";
-import { nostrEvent, nostrSecret, titleAndBody } from "@/lib/platforms/more";
-import type { MediaItem, PublishInput } from "@/lib/platforms/types";
+import { nostrEvent, nostrSecret, replyTags, titleAndBody } from "@/lib/platforms/more";
+import type { MediaItem, PartRef, PublishInput, ReplyInput } from "@/lib/platforms/types";
 import { PublishError } from "@/lib/platforms/types";
 import { oauth1 } from "@/lib/platforms/x";
 
@@ -45,6 +45,8 @@ const png: MediaItem = {
 const mp4: MediaItem = { ...png, id: "med_2", type: "video", contentType: "video/mp4", filename: "clip.mp4", publicUrl: "https://files.example/clip.mp4" };
 const post = (text: string, media: MediaItem[] = [], options: Record<string, unknown> = {}): PublishInput => ({ text, media, options });
 const get = (id: string) => connector(id)!;
+/** One later part of a thread. With only a root it is the first reply; with a parent it answers that part. */
+const part = (text: string, root: PartRef, parent?: PartRef, options: Record<string, unknown> = {}): ReplyInput => ({ text, index: parent ? 2 : 1, root, parent: parent ?? root, options });
 
 describe("registry", () => {
   it("lists every network once, each with setup steps and fields", () => {
@@ -372,5 +374,236 @@ describe("errors", () => {
     const error = await get("facebook").publish(post("hi"), { page_id: "p", access_token: "t" }, { fetch: fetcher }).catch((e) => e);
     expect(error.message).toBe("Facebook answered 401: Invalid token");
     expect(error.retryable).toBe(false);
+  });
+});
+
+describe("threads: which networks take one", () => {
+  it("offers reply on the networks that can thread or comment, and names the ones that cannot", () => {
+    expect(connectors.filter((c) => c.reply).map((c) => c.id)).toEqual(["x", "bluesky", "threads", "mastodon", "linkedin", "instagram", "facebook", "reddit", "telegram", "nostr", "lemmy", "sandbox"]);
+    expect(threadProblems(fits(get("discord")), ["a comment"])).toEqual(["Discord cannot post a thread from a webhook."]);
+    expect(threadProblems(fits(get("slack")), ["a comment"])).toEqual(["Slack cannot post a thread from an incoming webhook."]);
+    for (const id of ["tiktok", "youtube", "pinterest", "devto", "webhook"]) expect(threadProblems(fits(get(id)), ["a comment"]), id).toEqual([`${get(id).name} cannot post a thread.`]);
+    // No thread, no objection.
+    expect(threadProblems(fits(get("discord")), [])).toEqual([]);
+  });
+
+  it("measures every part the way the network counts, against its limit for a reply", () => {
+    expect(threadProblems(fits(get("x")), ["a".repeat(280), "a".repeat(281)])).toEqual(["X allows 280 characters in a reply; part 3 is 281."]);
+    // X counts a link as 23 whatever its length, in a reply as in a post.
+    expect(threadProblems(fits(get("x")), [`${"a".repeat(256)} https://example.com/${"p".repeat(80)}`])).toEqual([]);
+    expect(threadProblems(fits(get("linkedin")), ["a".repeat(1251)])).toEqual(["LinkedIn allows 1250 characters in a reply; part 2 is 1251."]);
+    expect(threadProblems(fits(get("mastodon")), ["fine", " "])).toEqual(["Part 3 of the thread is empty."]);
+    // The composer lets a part stand empty while it is being written, and still measures the rest.
+    expect(threadProblems(fits(get("mastodon")), ["", "a".repeat(501)], true)).toEqual(["Mastodon allows 500 characters in a reply; part 3 is 501."]);
+    expect(threadProblems(fits(get("sandbox")), Array(25).fill("p"))).toEqual(["A thread can have 25 parts; this has 26."]);
+  });
+});
+
+describe("threads: replying to a post", () => {
+  const root: PartRef = { id: "100" };
+  const previous: PartRef = { id: "101" };
+
+  it("X: names the tweet being answered", async () => {
+    const { fetcher, calls } = fake(() => ({ data: { id: "1791" } }));
+    const creds = { api_key: "k", api_secret: "s", access_token: "t", access_secret: "ts", username: "me" };
+    const result = await get("x").reply!(part("second", { id: "1789" }, { id: "1790" }), creds, { fetch: fetcher });
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toBe("https://api.x.com/2/tweets");
+    expect(calls[0].body).toEqual({ text: "second", reply: { in_reply_to_tweet_id: "1790" } });
+    expect(calls[0].headers.authorization).toMatch(/^OAuth oauth_consumer_key="k"/);
+    expect(result).toEqual({ id: "1791", url: "https://x.com/me/status/1791" });
+  });
+
+  it("Bluesky: keeps the cid from createRecord, and a reply quotes root and parent by uri and cid", async () => {
+    const { fetcher, calls } = fake(({ url }) => (url.endsWith("createSession") ? { accessJwt: "jwt", did: "did:plc:abc", handle: "me.bsky.social" } : { uri: "at://did:plc:abc/app.bsky.feed.post/3kzzz", cid: "bafy-new" }));
+    const creds = { identifier: "me.bsky.social", app_password: "pw" };
+    const first = await get("bluesky").publish(post("root"), creds, { fetch: fetcher });
+    expect(first.ref).toEqual({ cid: "bafy-new" });
+
+    const rootRef = { id: "at://did:plc:abc/app.bsky.feed.post/3kaaa", ref: { cid: "bafy-root" } };
+    const parentRef = { id: "at://did:plc:abc/app.bsky.feed.post/3kbbb", ref: { cid: "bafy-parent" } };
+    const result = await get("bluesky").reply!(part("third https://a.co/x", rootRef, parentRef), creds, { fetch: fetcher });
+    const sent = calls.at(-1)!;
+    expect(sent.url).toBe("https://bsky.social/xrpc/com.atproto.repo.createRecord");
+    expect(sent.headers.authorization).toBe("Bearer jwt");
+    const { repo, collection, record } = sent.body as { repo: string; collection: string; record: Record<string, unknown> };
+    expect([repo, collection]).toEqual(["did:plc:abc", "app.bsky.feed.post"]);
+    expect(record.text).toBe("third https://a.co/x");
+    expect(record.reply).toEqual({
+      root: { uri: "at://did:plc:abc/app.bsky.feed.post/3kaaa", cid: "bafy-root" },
+      parent: { uri: "at://did:plc:abc/app.bsky.feed.post/3kbbb", cid: "bafy-parent" },
+    });
+    expect(record.facets).toHaveLength(1);
+    expect(result).toEqual({ id: "at://did:plc:abc/app.bsky.feed.post/3kzzz", url: "https://bsky.app/profile/me.bsky.social/post/3kzzz", ref: { cid: "bafy-new" } });
+  });
+
+  it("Bluesky: will not guess a cid it was never given", async () => {
+    const { fetcher, calls } = fake(() => ({}));
+    await expect(get("bluesky").reply!(part("x", { id: "at://did/app.bsky.feed.post/1" }), { identifier: "me", app_password: "pw" }, { fetch: fetcher })).rejects.toThrow(/did not return a cid/);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("Mastodon: sets in_reply_to_id and keeps the post's visibility", async () => {
+    const { fetcher, calls } = fake(() => ({ id: "102", url: "https://example.social/@me/102" }));
+    const result = await get("mastodon").reply!(part("second", root, previous, { visibility: "unlisted" }), { instance: "https://example.social/", access_token: "tok" }, { fetch: fetcher });
+    expect(calls[0].url).toBe("https://example.social/api/v1/statuses");
+    expect(calls[0].method).toBe("POST");
+    expect(calls[0].body).toEqual({ status: "second", in_reply_to_id: "101", visibility: "unlisted" });
+    expect(calls[0].headers.authorization).toBe("Bearer tok");
+    expect(result).toEqual({ id: "102", url: "https://example.social/@me/102" });
+  });
+
+  it("Threads: makes a text container with reply_to_id, then publishes it", async () => {
+    const { fetcher, calls } = fake(({ url }) => {
+      if (url.endsWith("/u1/threads")) return { id: "c2" };
+      if (url.endsWith("/threads_publish")) return { id: "t2" };
+      return { permalink: "https://www.threads.net/@me/post/def" };
+    });
+    const result = await get("threads").reply!(part("second", root, previous), { access_token: "tok", user_id: "u1" }, { fetch: fetcher });
+    expect(calls[0].url).toBe("https://graph.threads.net/v1.0/u1/threads");
+    expect(calls[0].body).toEqual({ media_type: "TEXT", text: "second", reply_to_id: "101", access_token: "tok" });
+    expect(calls[1].url).toBe("https://graph.threads.net/v1.0/u1/threads_publish");
+    expect(calls[1].body).toEqual({ creation_id: "c2", access_token: "tok" });
+    expect(result).toEqual({ id: "t2", url: "https://www.threads.net/@me/post/def" });
+  });
+
+  it("Telegram: replies to the message id in the same chat", async () => {
+    const { fetcher, calls } = fake(() => ({ ok: true, result: { message_id: 43, chat: { username: "chan" } } }));
+    const result = await get("telegram").reply!(part("second", { id: "41" }, { id: "42" }, { silent: true }), { bot_token: "1:A", chat_id: "@chan" }, { fetch: fetcher });
+    expect(calls[0].url).toBe("https://api.telegram.org/bot1:A/sendMessage");
+    expect(calls[0].body).toEqual({ chat_id: "@chan", text: "second", disable_notification: true, reply_parameters: { message_id: 42 } });
+    expect(result).toEqual({ id: "43", url: "https://t.me/chan/43" });
+  });
+
+  it("Facebook Page: comments on the post, also for the parts after the first comment", async () => {
+    const { fetcher, calls } = fake(() => ({ id: "pg_55_901" }));
+    const result = await get("facebook").reply!(part("third", { id: "pg_55" }, { id: "pg_55_900" }), { page_id: "pg", access_token: "tok" }, { fetch: fetcher });
+    expect(calls[0].url).toBe("https://graph.facebook.com/pg_55/comments");
+    expect(calls[0].method).toBe("POST");
+    expect(calls[0].body).toEqual({ message: "third", access_token: "tok" });
+    expect(result).toEqual({ id: "pg_55_901" });
+  });
+
+  it("Instagram: comments on the media", async () => {
+    const { fetcher, calls } = fake(() => ({ id: "17870913679156914" }));
+    const result = await get("instagram").reply!(part("first comment", { id: "17895695668004550" }), { ig_user_id: "ig1", access_token: "tok" }, { fetch: fetcher });
+    expect(calls[0].url).toBe("https://graph.facebook.com/17895695668004550/comments");
+    expect(calls[0].method).toBe("POST");
+    expect(calls[0].body).toEqual({ message: "first comment", access_token: "tok" });
+    expect(result).toEqual({ id: "17870913679156914" });
+  });
+
+  it("LinkedIn: posts a comment to socialActions under the encoded post urn, as the same author", async () => {
+    const { fetcher, calls } = fake(
+      () =>
+        new Response(JSON.stringify({ id: "6643206422739898368", commentUrn: "urn:li:comment:(urn:li:activity:66,6643206422739898368)" }), {
+          status: 201,
+          headers: { "x-restli-id": "6643206422739898368", "content-type": "application/json" },
+        }),
+    );
+    const result = await get("linkedin").reply!(part("Thanks (all) #team", { id: "urn:li:share:77" }), { access_token: "t", author: "urn:li:person:p" }, { fetch: fetcher });
+    expect(calls[0].url).toBe("https://api.linkedin.com/rest/socialActions/urn%3Ali%3Ashare%3A77/comments");
+    expect(calls[0].method).toBe("POST");
+    // Comment text is plain: it is not escaped the way a post's commentary is.
+    expect(calls[0].body).toEqual({ actor: "urn:li:person:p", object: "urn:li:share:77", message: { text: "Thanks (all) #team" } });
+    expect(calls[0].headers["linkedin-version"]).toMatch(/^\d{6}$/);
+    expect(calls[0].headers["x-restli-protocol-version"]).toBe("2.0.0");
+    expect(calls[0].headers.authorization).toBe("Bearer t");
+    expect(result).toEqual({
+      id: "urn:li:comment:(urn:li:activity:66,6643206422739898368)",
+      url: "https://www.linkedin.com/feed/update/urn:li:share:77?commentUrn=urn%3Ali%3Acomment%3A(urn%3Ali%3Aactivity%3A66%2C6643206422739898368)",
+    });
+  });
+
+  it("LinkedIn: falls back to the id in the response header", async () => {
+    const { fetcher } = fake(() => new Response(null, { status: 201, headers: { "x-restli-id": "6643" } }));
+    expect(await get("linkedin").reply!(part("ok", { id: "urn:li:ugcPost:9" }), { access_token: "t", author: "urn:li:person:p" }, { fetch: fetcher })).toEqual({ id: "6643", url: undefined });
+  });
+
+  it("Reddit: comments on the thing above it and reads back the comment's name and link", async () => {
+    const { fetcher, calls } = fake(({ url }) =>
+      url.includes("access_token") ? { access_token: "rt" } : { json: { errors: [], data: { things: [{ kind: "t1", data: { name: "t1_def", permalink: "/r/test/comments/abc/title/def/" } }] } } },
+    );
+    const creds = { client_id: "id", client_secret: "sec", username: "me", password: "pw", subreddit: "test" };
+    const result = await get("reddit").reply!(part("second", { id: "t3_abc" }, { id: "t1_ccc" }), creds, { fetch: fetcher });
+    expect(calls[1].url).toBe("https://oauth.reddit.com/api/comment");
+    expect(calls[1].method).toBe("POST");
+    expect(calls[1].body).toEqual({ api_type: "json", thing_id: "t1_ccc", text: "second" });
+    expect(calls[1].headers.authorization).toBe("Bearer rt");
+    expect(result).toEqual({ id: "t1_def", url: "https://www.reddit.com/r/test/comments/abc/title/def/" });
+  });
+
+  it("Reddit: reports a refused comment", async () => {
+    const { fetcher } = fake(({ url }) => (url.includes("access_token") ? { access_token: "rt" } : { json: { errors: [["RATELIMIT", "you are doing that too much", "ratelimit"]] } }));
+    const creds = { client_id: "id", client_secret: "sec", username: "me", password: "pw", subreddit: "test" };
+    await expect(get("reddit").reply!(part("x", { id: "t3_abc" }), creds, { fetch: fetcher })).rejects.toThrow("Reddit refused the comment: RATELIMIT you are doing that too much ratelimit");
+  });
+
+  it("Lemmy: the first reply names the post, later ones also name the comment above", async () => {
+    const { fetcher, calls } = fake(({ url }) => (url.endsWith("/user/login") ? { jwt: "j" } : { comment_view: { comment: { id: 501 } } }));
+    const creds = { instance: "https://lemmy.example/", username: "me", password: "pw", community: "tech" };
+    const result = await get("lemmy").reply!(part("first comment", { id: "99" }), creds, { fetch: fetcher });
+    expect(calls[1].url).toBe("https://lemmy.example/api/v3/comment");
+    expect(calls[1].body).toEqual({ content: "first comment", post_id: 99 });
+    expect(calls[1].headers.authorization).toBe("Bearer j");
+    expect(result).toEqual({ id: "501", url: "https://lemmy.example/comment/501" });
+    // Post 99 and comment 99 are different things, so the parent is named only from the second reply on.
+    await get("lemmy").reply!(part("second", { id: "99" }, { id: "99" }), creds, { fetch: fetcher });
+    expect(calls[3].body).toEqual({ content: "second", post_id: 99, parent_id: 99 });
+  });
+
+  it("Sandbox: accepts a part, and fails one that asks to", async () => {
+    expect((await get("sandbox").reply!(part("fine", root), { name: "Rehearsal" }, { fetch })).id).toMatch(/^sandbox-/);
+    await expect(get("sandbox").reply!(part("no [fail]", root), { name: "Rehearsal" }, { fetch })).rejects.toThrow(/asked to fail/);
+  });
+});
+
+describe("threads: Nostr", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  const secret = "0000000000000000000000000000000000000000000000000000000000000003";
+  const author = "f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9";
+  const rootId = "a".repeat(64);
+  const parentId = "b".repeat(64);
+
+  it("marks the root, and the note being answered once the thread is past its first reply", () => {
+    expect(replyTags(rootId, null, author)).toEqual([["e", rootId, "", "root"], ["p", author]]);
+    expect(replyTags(rootId, parentId, author)).toEqual([["e", rootId, "", "root"], ["e", parentId, "", "reply"], ["p", author]]);
+  });
+
+  it("sends relays a signed kind 1 note carrying those tags", async () => {
+    const events: ReturnType<typeof nostrEvent>[] = [];
+    const urls: string[] = [];
+    /** A relay that accepts whatever it is sent. */
+    class Relay {
+      onopen?: () => void;
+      onerror?: () => void;
+      onmessage?: (message: { data: string }) => void;
+      constructor(url: string) {
+        urls.push(url);
+        queueMicrotask(() => this.onopen?.());
+      }
+      send(data: string) {
+        const [verb, event] = JSON.parse(data) as [string, ReturnType<typeof nostrEvent>];
+        expect(verb).toBe("EVENT");
+        events.push(event);
+        this.onmessage?.({ data: JSON.stringify(["OK", event.id, true, ""]) });
+      }
+      close() {}
+    }
+    vi.stubGlobal("WebSocket", Relay);
+    // An address literal, so the private-network check needs no name lookup.
+    const creds = { private_key: secret, relays: "wss://93.184.216.34" };
+    const result = await get("nostr").reply!(part("third", { id: rootId }, { id: parentId }), creds, { fetch });
+    expect(urls).toEqual(["wss://93.184.216.34"]);
+    const [event] = events;
+    expect(event).toMatchObject({ kind: 1, content: "third", pubkey: author, tags: [["e", rootId, "", "root"], ["e", parentId, "", "reply"], ["p", author]] });
+    // The id commits to the tags, so a relay or reader can check the note really answers that thread.
+    expect(schnorr.verify(Buffer.from(event.sig, "hex"), Buffer.from(event.id, "hex"), Buffer.from(event.pubkey, "hex"))).toBe(true);
+    expect(nostrEvent(nostrSecret(secret), "third", event.created_at, event.tags).id).toBe(event.id);
+    expect(result.id).toBe(event.id);
+
+    await get("nostr").reply!(part("second", { id: rootId }), creds, { fetch });
+    expect(events[1].tags).toEqual([["e", rootId, "", "root"], ["p", author]]);
   });
 });
