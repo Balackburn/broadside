@@ -6,11 +6,15 @@ A broadside is a single printed sheet posted in public, and a ship firing every 
 
 ## What it does
 
-- **Posts to 18 destinations at once:** X, Bluesky, Threads, Mastodon, LinkedIn, Instagram, Facebook Pages, TikTok, YouTube, Pinterest, Reddit, Telegram, Discord, Slack, Nostr, Lemmy, DEV and any webhook (Zapier, n8n, Make, your own server). A sandbox destination lets you rehearse without posting anywhere.
-- **Refuses instead of trimming.** Every account is checked against its network's rules before anything is sent. If one copy would be cut or rejected, nothing goes out and you are told which network and by how much. Give that account its own version and send again.
-- **Schedules, drafts and retries.** One failing network never holds up the others, each target has its own status and public link, and a single failed target can be retried alone.
-- **Is an MCP server.** Claude, Cursor, Codex or any MCP client can list accounts, check a post, publish, schedule and confirm delivery. Credentials are never passed through chat.
-- **Is one process and one file.** Node and a SQLite file. No queue, no database server, no account with anyone.
+Broadside posts to 18 destinations at once: X, Bluesky, Threads, Mastodon, LinkedIn, Instagram, Facebook Pages, TikTok, YouTube, Pinterest, Reddit, Telegram, Discord, Slack, Nostr, Lemmy, DEV and any webhook (Zapier, n8n, Make or your own server). A sandbox destination lets you rehearse without posting anywhere.
+
+It checks every account against that network's rules before it sends anything. If one copy is too long or carries media the network rejects, the post is held and you are told which network and by how much. Give that account its own version and send again.
+
+You can publish now, schedule for later or save a draft. One network failing does not hold up the others. Each target keeps its own status and public link, and you can retry a failed target on its own.
+
+It is also an MCP server. Claude, Cursor, Codex and other MCP clients can list accounts, check a post, publish, schedule and confirm delivery. You type credentials into Broadside, so they stay out of the chat.
+
+It runs as one Node process with one SQLite file. There is no queue, no database server and no account with anyone.
 
 ## Run it
 
@@ -103,6 +107,12 @@ Things worth knowing before you rely on a network:
 
 Adding a network is one object that implements `Connector` in `src/lib/platforms/types.ts`, plus a line in the registry and a request-shape test.
 
+## Design
+
+The interface is dark, with a serif display face (Instrument Serif) over Geist. The front page borrows its language from Resend's site: a black ground, hairline cards and a 3D object in the hero. Broadside's version is its own CSS; no fonts, renders or code come from Resend.
+
+Network logos come from the CC0 [Simple Icons](https://simpleicons.org) set and belong to their owners. LinkedIn, Slack and Nostr are not in that set, so they show initials.
+
 ## Licence
 
-MIT. Free, with no plans, seats or quotas, and no service in the middle.
+MIT. There are no paid plans, and no service sits between you and the networks.

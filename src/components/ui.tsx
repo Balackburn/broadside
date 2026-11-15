@@ -1,5 +1,6 @@
 "use client";
 
+import { NetworkLogo } from "./logos";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 
 /* Brand ------------------------------------------------------------------- */
@@ -26,32 +27,11 @@ export function Wordmark({ size = 22 }: { size?: number }) {
   );
 }
 
-const INITIALS: Record<string, string> = {
-  x: "X",
-  bluesky: "Bs",
-  threads: "Th",
-  mastodon: "Ma",
-  linkedin: "in",
-  instagram: "Ig",
-  facebook: "Fb",
-  tiktok: "Tt",
-  youtube: "Yt",
-  pinterest: "Pi",
-  reddit: "Rd",
-  telegram: "Tg",
-  discord: "Dc",
-  slack: "Sl",
-  nostr: "No",
-  lemmy: "Le",
-  devto: "Dv",
-  webhook: "Wh",
-  sandbox: "Sb",
-};
-
+/** A network's badge: its real mark in a small round tile. */
 export function Stamp({ platform, large }: { platform: string; large?: boolean }) {
   return (
     <span className={`stamp ${large ? "stamp-lg" : ""}`} aria-hidden="true">
-      {INITIALS[platform] ?? platform.slice(0, 2)}
+      <NetworkLogo platform={platform} size={large ? 20 : 14} />
     </span>
   );
 }

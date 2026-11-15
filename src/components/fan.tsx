@@ -21,7 +21,7 @@ export function Fan({
   children?: React.ReactNode;
 }) {
   const [text, setText] = useState(
-    "We just shipped something. One post, sent everywhere at once, and every network gets a copy that fits. #launch",
+    "We just shipped something. Type more here and watch each network count it. Past 280 characters, X stops fitting first.",
   );
   const shown = networks.slice(0, 5);
 
@@ -31,7 +31,7 @@ export function Fan({
         {children}
         <div className="rise mt-10" style={{ "--i": 3 } as React.CSSProperties}>
           <label htmlFor="try" className="label">
-            Try it: write a post
+            Try it: keep typing
           </label>
           <textarea
             id="try"
@@ -100,7 +100,7 @@ function Sheet({
         style={{ color: over ? "var(--bad)" : "var(--good)" }}
       >
         {over
-          ? `${length - network.limits.maxChars} over. Broadside would refuse this, not trim it.`
+          ? `${length - network.limits.maxChars} over. Broadside will hold the post until this copy fits.`
           : "Fits."}
       </p>
     </article>

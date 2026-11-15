@@ -10,7 +10,7 @@ type Client = "claude-code" | "json" | "stdio" | "curl";
 const TOOLS: [string, string][] = [
   ["list_platforms", "Every network, its limits and what it needs to connect"],
   ["list_accounts", "The accounts this Broadside can post to"],
-  ["connect_account", "A link where you enter credentials, never in chat"],
+  ["connect_account", "A link where you enter the credentials yourself"],
   ["upload_media", "Add an image or video by URL, bytes or local path"],
   ["check_post", "Dry run: does this fit each network?"],
   ["create_post", "Publish now, schedule, or save a draft"],

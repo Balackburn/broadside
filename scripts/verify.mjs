@@ -28,9 +28,12 @@ function ok(condition, label, detail = "") {
   console.log(`  ✓ ${label}`);
 }
 
+// verify builds into its own folder, so a Broadside already running from .next keeps working.
+process.env.BROADSIDE_DIST_DIR = ".next-verify";
+
 function step(title, command, args) {
   console.log(`\n▸ ${title}`);
-  const result = spawnSync(command, args, { cwd: root, stdio: ["ignore", "pipe", "pipe"], encoding: "utf8" });
+  const result = spawnSync(command, args, { cwd: root, stdio: ["ignore", "pipe", "pipe"], encoding: "utf8", env: process.env });
   if (result.status !== 0) {
     console.error(result.stdout.slice(-4000), result.stderr.slice(-4000));
     throw new Error(`${title} failed`);

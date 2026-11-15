@@ -1,33 +1,51 @@
-/* Hallmark · v2.0.0 · theme: custom (three dealt themes declined: none carried the printed-sheet idea) · genre: modern-minimal · signature: one post fanned into a sheet per network, live in the hero · paper, ink, one spot red · Bricolage Grotesque over Geist */
+/* Hallmark · v2.0.0 · theme: custom, after Resend by request (black ground, serif display, hairline glass, 3D ring) · genre: modern-minimal · signature: one post turning in space as a card per network · Instrument Serif over Geist */
 /* critique: the fan carries the first screen; below it the page leans on type and tone fields with no photographs, by choice (no honest picture of this product exists but its own interface) */
 @import "tailwindcss";
 
 :root {
-  /* Colour: one ground, one ink, one signal. Surfaces step in tone, never in hue. */
-  --paper: oklch(0.975 0.003 250);
-  --paper-2: oklch(0.945 0.004 250);
-  --paper-3: oklch(0.905 0.005 250);
-  --ink: oklch(0.19 0.012 262);
-  --ink-2: oklch(0.4 0.012 262);
-  --ink-3: oklch(0.55 0.01 262);
-  --line: oklch(0.19 0.012 262 / 0.12);
-  --line-strong: oklch(0.19 0.012 262 / 0.24);
-  --signal: oklch(0.6 0.235 27);
-  --signal-press: oklch(0.54 0.225 27);
-  --on-signal: oklch(0.99 0.005 27);
-  --pill-shadow: 0 1px 2px oklch(0.19 0.012 262 / 0.14);
-  --good: oklch(0.52 0.14 150);
-  --bad: oklch(0.55 0.22 25);
-  --scrim: oklch(0.19 0.012 262 / 0.42);
-  --float-shadow: 0 1px 2px oklch(0.19 0.012 262 / 0.08), 0 12px 32px -8px oklch(0.19 0.012 262 / 0.22);
+  color-scheme: dark;
 
-  --font-display: var(--font-bricolage), "Helvetica Neue", sans-serif;
+  /* Colour: a black ground, near-white ink, one red signal. Surfaces are lines and light, not fills. */
+  --paper: oklch(0 0 0);
+  --paper-2: oklch(0.155 0.004 250);
+  --paper-3: oklch(0.215 0.005 250);
+  --ink: oklch(0.955 0.002 250);
+  --ink-2: oklch(0.715 0.006 220);
+  --ink-3: oklch(0.55 0.006 220);
+  --line: oklch(0.93 0.03 240 / 0.14);
+  --line-strong: oklch(0.93 0.03 240 / 0.26);
+  --signal: oklch(0.66 0.22 27);
+  --signal-press: oklch(0.6 0.22 27);
+  --on-signal: oklch(0.99 0.005 27);
+  --good: oklch(0.8 0.16 152);
+  --bad: oklch(0.74 0.18 25);
+  --scrim: oklch(0 0 0 / 0.72);
+  --float-shadow: 0 0 0 1px oklch(0.93 0.03 240 / 0.14), 0 24px 60px -12px oklch(0 0 0 / 0.9);
+  --pill-shadow: 0 0 0 1px oklch(0.93 0.03 240 / 0.14);
+
+  /* Light: how surfaces catch it. */
+  --text-fill: linear-gradient(to right bottom, oklch(1 0 0) 30%, oklch(1 0 0 / 0.5));
+  --glass: linear-gradient(104deg, oklch(1 0 0 / 0.05) 5%, oklch(0.96 0.02 100 / 0.1) 100%);
+  --glass-hover: linear-gradient(104deg, oklch(1 0 0 / 0.1) 5%, oklch(0.96 0.02 100 / 0.16) 100%);
+  --glass-line: oklch(1 0 0 / 0.09);
+  --card-light: radial-gradient(42% 9% at 50% 0%, oklch(1 0 0 / 0.11), oklch(1 0 0 / 0));
+  --card-fill: linear-gradient(oklch(0.2 0.004 250 / 0.5), oklch(0.12 0.004 250 / 0.2));
+  --tile-fill: linear-gradient(160deg, oklch(0.36 0.01 250), oklch(0.13 0.006 250) 62%);
+  --tile-edge: inset 0 1px 0 oklch(1 0 0 / 0.32), inset 0 -8px 16px oklch(0 0 0 / 0.5), 0 0 0 1px oklch(0 0 0), 0 18px 40px -8px oklch(0 0 0 / 0.9), 0 0 60px oklch(0.66 0.22 27 / 0.14);
+  --ray: linear-gradient(100deg, oklch(1 0 0 / 0) 30%, oklch(1 0 0 / 0.09) 48%, oklch(1 0 0 / 0.02) 56%, oklch(1 0 0 / 0) 70%);
+  --floor: radial-gradient(50% 50% at 50% 50%, oklch(1 0 0 / 0.1), oklch(1 0 0 / 0));
+  --disco: conic-gradient(from var(--turn-angle), oklch(1 0 0 / 0.55), oklch(1 0 0 / 0.08) 25%, oklch(0.66 0.22 27 / 0.75) 50%, oklch(1 0 0 / 0.08) 75%, oklch(1 0 0 / 0.55));
+  --fade-down: linear-gradient(oklch(0 0 0) 55%, oklch(0 0 0 / 0));
+  --fade-ends: linear-gradient(oklch(0 0 0 / 0), oklch(0 0 0) 30%, oklch(0 0 0) 65%, oklch(0 0 0 / 0));
+  --fade-sides: linear-gradient(90deg, oklch(0 0 0 / 0), oklch(0 0 0) 14%, oklch(0 0 0) 86%, oklch(0 0 0 / 0));
+
+  --font-display: var(--font-serif), Georgia, serif;
   --font-text: var(--font-geist), system-ui, sans-serif;
   --font-code: var(--font-geist-mono), ui-monospace, monospace;
 
-  --r-1: 6px;
-  --r-2: 10px;
-  --r-3: 16px;
+  --r-1: 10px;
+  --r-2: 16px;
+  --r-3: 24px;
   --page: 1200px;
   --gutter: clamp(20px, 4vw, 40px);
 
@@ -45,23 +63,10 @@
   --ease-bounce: cubic-bezier(0.34, 1.36, 0.64, 1);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --paper: oklch(0.165 0.008 262);
-    --paper-2: oklch(0.205 0.009 262);
-    --paper-3: oklch(0.255 0.01 262);
-    --ink: oklch(0.955 0.004 250);
-    --ink-2: oklch(0.78 0.006 250);
-    --ink-3: oklch(0.62 0.008 250);
-    --line: oklch(0.955 0.004 250 / 0.12);
-    --line-strong: oklch(0.955 0.004 250 / 0.26);
-    --signal: oklch(0.66 0.22 27);
-    --signal-press: oklch(0.6 0.22 27);
-    --good: oklch(0.74 0.15 150);
-    --bad: oklch(0.72 0.18 25);
-    --scrim: oklch(0.08 0.005 262 / 0.6);
-    --float-shadow: 0 1px 2px oklch(0 0 0 / 0.4), 0 16px 40px -8px oklch(0 0 0 / 0.6);
-  }
+@property --turn-angle {
+  syntax: "<angle>";
+  initial-value: 0deg;
+  inherits: false;
 }
 
 @theme inline {
@@ -110,32 +115,41 @@
 
   /* Type --------------------------------------------------------------------- */
 
+  /* Display: a serif set large, lit from the top left. */
   .display {
     font-family: var(--font-display);
-    font-variation-settings: "wdth" 78, "opsz" 96;
-    font-weight: 800;
-    line-height: 0.9;
-    letter-spacing: -0.035em;
+    font-weight: 400;
+    line-height: 1;
+    letter-spacing: -0.012em;
     text-wrap: balance;
     overflow-wrap: break-word;
     min-width: 0;
+    padding-bottom: 0.08em;
+    background-image: var(--text-fill);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
   }
 
+  /* Section heads: the text face, regular weight, drawn tight. */
   .heading {
-    font-family: var(--font-display);
-    font-variation-settings: "wdth" 84, "opsz" 48;
-    font-weight: 700;
-    line-height: 1.02;
-    letter-spacing: -0.025em;
+    font-family: var(--font-text);
+    font-weight: 400;
+    line-height: 1.14;
+    letter-spacing: -0.045em;
     text-wrap: balance;
+    padding-bottom: 0.06em;
+    background-image: var(--text-fill);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
   }
 
   .title {
-    font-family: var(--font-display);
-    font-variation-settings: "wdth" 90, "opsz" 24;
-    font-weight: 700;
-    line-height: 1.15;
-    letter-spacing: -0.015em;
+    font-family: var(--font-text);
+    font-weight: 500;
+    line-height: 1.2;
+    letter-spacing: -0.02em;
   }
 
   .note {
@@ -300,20 +314,16 @@
     flex: none;
     width: 28px;
     height: 28px;
-    border-radius: 50%;
-    background: var(--ink);
-    color: var(--paper);
-    font-family: var(--font-display);
-    font-variation-settings: "wdth" 80;
-    font-weight: 800;
-    font-size: 12px;
-    letter-spacing: -0.02em;
-    line-height: 1;
+    border-radius: 8px;
+    background: var(--paper-3);
+    box-shadow: inset 0 0 0 1px var(--line);
+    color: var(--ink);
+    font-family: var(--font-text);
   }
   .stamp-lg {
     width: 40px;
     height: 40px;
-    font-size: 16px;
+    border-radius: 12px;
   }
 
   /* Account chips: press to include an account in the post. */
@@ -344,8 +354,9 @@
     box-shadow: none;
   }
   .chip[aria-pressed="true"] .stamp {
-    background: var(--signal);
-    color: var(--on-signal);
+    background: var(--paper);
+    color: var(--ink);
+    box-shadow: none;
   }
 
   /* Segmented tabs with a sliding pill (transitions.dev: tabs sliding). */
@@ -617,17 +628,12 @@
     line-height: 1.6;
     padding: 16px;
     border-radius: var(--r-2);
-    background: var(--ink);
-    color: var(--paper);
+    background-image: var(--card-fill);
+    box-shadow: inset 0 0 0 1px var(--line);
+    color: var(--ink);
     overflow-x: auto;
     white-space: pre;
     tab-size: 2;
-  }
-  @media (prefers-color-scheme: dark) {
-    .code {
-      background: var(--paper-2);
-      color: var(--ink);
-    }
   }
 
   /* App shell ---------------------------------------------------------------- */
@@ -699,6 +705,267 @@
       background: var(--paper-2);
     }
   }
+  /* Resend-inspired surfaces --------------------------------------------- */
+
+  /* A card is a hairline and a little light on its top edge. */
+  .glass {
+    position: relative;
+    border-radius: var(--r-3);
+    background-image: var(--card-light), var(--card-fill);
+    box-shadow: inset 0 0 0 1px var(--line);
+    overflow: hidden;
+  }
+
+  .btn-glass {
+    background-color: transparent;
+    background-image: var(--glass);
+    box-shadow: inset 0 0 0 2px var(--glass-line);
+    -webkit-backdrop-filter: blur(25px);
+    backdrop-filter: blur(25px);
+    color: var(--ink);
+    border-radius: var(--r-2);
+    font-weight: 600;
+  }
+  .btn-ghost {
+    background: transparent;
+    color: var(--ink-2);
+    border-radius: var(--r-2);
+    font-weight: 600;
+  }
+  @media (hover: hover) and (pointer: fine) {
+    .btn-glass:hover:not(:disabled) {
+      background-image: var(--glass-hover);
+    }
+    .btn-ghost:hover:not(:disabled) {
+      color: var(--ink);
+    }
+  }
+
+  /* The announcement pill: a slow turn of colour around its edge. */
+  .pill {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 32px;
+    padding: 0 14px;
+    border-radius: 999px;
+    background: var(--paper);
+    font-size: 14px;
+    color: var(--ink);
+    isolation: isolate;
+  }
+  .pill::before {
+    content: "";
+    position: absolute;
+    inset: -1px;
+    z-index: -1;
+    border-radius: inherit;
+    background: var(--disco);
+    animation: turn 6s linear infinite;
+  }
+  .pill::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    border-radius: inherit;
+    background: var(--paper);
+  }
+  @keyframes turn {
+    to {
+      --turn-angle: 360deg;
+    }
+  }
+
+  /* The icon tile above a section: a small machined block that tips toward the pointer. */
+  .tile {
+    display: grid;
+    place-items: center;
+    width: 72px;
+    height: 72px;
+    border-radius: 20px;
+    background-image: var(--tile-fill);
+    box-shadow: var(--tile-edge);
+    color: var(--ink);
+    transform: perspective(600px) rotateX(14deg);
+    transition: transform var(--duration-fast) var(--ease-smooth-out);
+  }
+  @media (hover: hover) and (pointer: fine) {
+    .tile:hover {
+      transform: perspective(600px) rotateX(0deg) translateY(-2px);
+    }
+  }
+
+  /* Hero light: one ray across the ground and a pool under the ring. */
+  .ray {
+    position: absolute;
+    inset: -20% -10% auto -10%;
+    height: 140%;
+    background-image: var(--ray);
+    filter: blur(24px);
+    -webkit-mask-image: var(--fade-ends);
+    mask-image: var(--fade-ends);
+    pointer-events: none;
+  }
+  .floor {
+    position: absolute;
+    left: 50%;
+    bottom: -12px;
+    width: 110%;
+    height: 120px;
+    margin-left: -55%;
+    background-image: var(--floor);
+    filter: blur(12px);
+    pointer-events: none;
+  }
+
+  /* The ring: one post, struck once per network, turning in space. */
+  .ring-stage {
+    position: relative;
+    height: 360px;
+    perspective: 1500px;
+    -webkit-mask-image: var(--fade-sides);
+    mask-image: var(--fade-sides);
+  }
+  @media (min-width: 1024px) {
+    .ring-stage {
+      height: 440px;
+    }
+  }
+  .ring-tilt {
+    position: absolute;
+    inset: 0;
+    transform-style: preserve-3d;
+    /* Pushed back by the ring's radius, so the nearest card is at its true size and the rest recede. */
+    transform: translateZ(-330px) rotateX(-7deg);
+    will-change: transform;
+  }
+  .ring {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 0;
+    height: 0;
+    transform-style: preserve-3d;
+    animation: ring-spin 48s linear infinite;
+  }
+  .ring[data-paused="true"] {
+    animation-play-state: paused;
+  }
+  @keyframes ring-spin {
+    to {
+      transform: rotateY(-360deg);
+    }
+  }
+  .ring-card {
+    position: absolute;
+    left: -124px;
+    top: -150px;
+    width: 248px;
+    height: 300px;
+    padding: 16px;
+    border-radius: var(--r-2);
+    background-color: var(--paper);
+    background-image: var(--card-light), var(--card-fill);
+    box-shadow: inset 0 0 0 1px var(--line-strong);
+    backface-visibility: hidden;
+    transform: rotateY(calc(var(--i) * 45deg)) translateZ(330px);
+  }
+
+  .drop {
+    animation: drop var(--duration-very-slow) var(--ease-smooth-out) both;
+  }
+  @keyframes drop {
+    from {
+      opacity: 0;
+      transform: translateY(-16px);
+    }
+  }
+  .scale-in {
+    animation: scale-in 1200ms var(--ease-smooth-out) both;
+    animation-delay: 250ms;
+  }
+  @keyframes scale-in {
+    from {
+      opacity: 0;
+      transform: scale(0.94);
+    }
+  }
+
+  /* UI fragments in a card fade out at the bottom instead of being cut. */
+  .fade-down {
+    -webkit-mask-image: var(--fade-down);
+    mask-image: var(--fade-down);
+  }
+
+  /* A caret for text that is being typed in a demo. */
+  .caret::after {
+    content: "";
+    display: inline-block;
+    width: 2px;
+    height: 1.1em;
+    margin-left: 1px;
+    vertical-align: text-bottom;
+    background: var(--ink);
+    animation: blink 1s steps(1) infinite;
+  }
+  @keyframes blink {
+    50% {
+      opacity: 0;
+    }
+  }
+
+  /* Working text: a band of light passes over it (transitions.dev: shimmer text). */
+  .shimmer {
+    background-image: linear-gradient(90deg, var(--ink-3) 35%, var(--ink) 50%, var(--ink-3) 65%);
+    background-size: 220% 100%;
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    animation: shimmer 1.6s linear infinite;
+  }
+  @keyframes shimmer {
+    from {
+      background-position: 110% 0;
+    }
+    to {
+      background-position: -110% 0;
+    }
+  }
+
+  /* A row of logos: quiet until pointed at. */
+  .logo-cell {
+    display: grid;
+    place-items: center;
+    align-content: center;
+    gap: 10px;
+    min-height: 88px;
+    border-radius: var(--r-2);
+    color: var(--ink-2);
+    font-size: 13px;
+    transition:
+      color var(--duration-quick) ease,
+      background-color var(--duration-quick) ease,
+      transform var(--duration-quick) var(--ease-out);
+  }
+  button.logo-cell {
+    cursor: pointer;
+  }
+  .logo-cell[aria-selected="true"] {
+    color: var(--ink);
+    background-color: var(--paper-2);
+    box-shadow: inset 0 0 0 1px var(--line);
+  }
+  button.logo-cell:active {
+    transform: scale(0.97);
+  }
+  @media (hover: hover) and (pointer: fine) {
+    .logo-cell:hover {
+      color: var(--ink);
+    }
+  }
+
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -707,12 +974,19 @@
   *::after {
     animation-duration: 1ms !important;
     animation-delay: 0ms !important;
+    animation-iteration-count: 1 !important;
     transition-duration: 1ms !important;
     scroll-behavior: auto !important;
   }
   .rise,
   .reveal,
-  .fan-sheet {
+  .fan-sheet,
+  .drop,
+  .scale-in,
+  .ring,
+  .pill::before,
+  .shimmer,
+  .caret::after {
     animation: none;
   }
 }
