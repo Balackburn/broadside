@@ -87,10 +87,11 @@ describe("every network that signs in", () => {
     youtube: { client_id: "yid", client_secret: "app-secret-yt" },
     pinterest: { app_id: "pid", app_secret: "app-secret-pin" },
     tiktok: { client_key: "ck", client_secret: "app-secret-tt" },
+    tumblr: { consumer_key: "tk", consumer_secret: "app-secret-tm" },
   };
   const signingIn = connectors.filter((c) => c.oauth);
 
-  it("is the eight that have a developer app: TikTok and the seven added to it", () => {
+  it("is the nine that have a developer app", () => {
     expect(signingIn.map((c) => c.id).sort()).toEqual(Object.keys(apps).sort());
   });
 
@@ -788,5 +789,94 @@ describe("Pinterest", () => {
     expect(net.calls[0]).toMatchObject({ path: "https://api.pinterest.com/v5/user_account", auth: "Bearer pin-pasted" });
     expect(account.handle).toBe("@printer");
     expect(connector("pinterest")!.oauth!.paste.required).toEqual(["access_token", "board_id"]);
+  });
+});
+
+/* Tumblr ------------------------------------------------------------------- */
+
+describe("Tumblr", () => {
+  const app = { consumer_key: "tkey", consumer_secret: "tumblr-app-secret" };
+  let issued = 0;
+  const tumblrNet = (overrides: (call: Call) => unknown = () => undefined) =>
+    network((call) => {
+      const special = overrides(call);
+      if (special !== undefined) return special;
+      if (call.path === "https://api.tumblr.com/v2/oauth2/token") {
+        issued++;
+        return { access_token: `tma-${issued}`, expires_in: 2520, id_token: false, refresh_token: `tmr-${issued}`, scope: "basic write offline_access", token_type: "bearer" };
+      }
+      if (call.path === "https://api.tumblr.com/v2/user/info") {
+        return { meta: { status: 200, msg: "OK" }, response: { user: { name: "printer", blogs: [{ name: "typeshop", title: "The Type Shop", primary: true }, { name: "proofs", title: "Proofs" }] } } };
+      }
+      return Response.json({ meta: { status: 201, msg: "Created" }, response: { id: "730000000000000001" } }, { status: 201 });
+    });
+
+  it("sends the browser to Tumblr for the scopes that post and stay signed in, with no PKCE", () => {
+    const { address, params } = begin("tumblr", app);
+    expect(address).toBe("https://www.tumblr.com/oauth2/authorize");
+    expect(params).toEqual({ client_id: "tkey", response_type: "code", scope: "basic write offline_access", redirect_uri: "http://localhost:3000/oauth/tumblr/callback", state: STATE });
+  });
+
+  it("exchanges the code with the key and secret in the body, offers the blogs, and connects the one picked", async () => {
+    const net = tumblrNet();
+    const { choice, account } = await finishOAuth("tumblr", begin("tumblr", app).state, "tm-code", net.fetcher);
+    expect(account).toBeUndefined();
+    expect(net.calls[0]).toMatchObject({ url: "https://api.tumblr.com/v2/oauth2/token", method: "POST", auth: null });
+    expect(net.calls[0].body).toEqual({ client_id: "tkey", client_secret: "tumblr-app-secret", code: "tm-code", grant_type: "authorization_code", redirect_uri: "http://localhost:3000/oauth/tumblr/callback" });
+    expect(net.calls[1]).toMatchObject({ url: "https://api.tumblr.com/v2/user/info", auth: expect.stringMatching(/^Bearer tma-/) });
+    const waiting = pendingChoice(choice!)!;
+    expect(waiting).toMatchObject({ platform: "tumblr", multiple: false, prompt: "Pick the blog to post to." });
+    expect(waiting.choices).toEqual([
+      { id: "typeshop", name: "The Type Shop", detail: "typeshop.tumblr.com" },
+      { id: "proofs", name: "Proofs", detail: "proofs.tumblr.com" },
+    ]);
+    expect(JSON.stringify(waiting)).not.toMatch(/tma-|tmr-|tumblr-app-secret/);
+    // Each sign-in holds one refresh token, which Tumblr replaces when it is used, so one sign-in connects one blog.
+    await expect(choose(choice!, ["typeshop", "proofs"], net.fetcher)).rejects.toThrow("Tumblr connects one at a time. Pick one.");
+    const { connected } = await choose(choice!, ["proofs"], net.fetcher);
+    expect(connected[0].handle).toBe("proofs.tumblr.com");
+    expect(credentialsOf(connected[0].id)).toMatchObject({ consumer_key: "tkey", consumer_secret: "tumblr-app-secret", blog: "proofs" });
+    expect(credentialsOf(connected[0].id).refresh_token).toMatch(/^tmr-/);
+  });
+
+  it("renews the 42-minute token before posting, and keeps the refresh token Tumblr rotated to", async () => {
+    const net = tumblrNet();
+    const { choice } = await finishOAuth("tumblr", begin("tumblr", app).state, "tm-code", net.fetcher);
+    const account = (await choose(choice!, ["typeshop"], net.fetcher)).connected[0];
+    expect(Math.round((Date.parse(credentialsOf(account.id).expires_at) - Date.now()) / 60_000)).toBe(42);
+    expire(account.id);
+    const spent = credentialsOf(account.id).refresh_token;
+    const from = net.calls.length;
+    const post = await createPost({ content: "Fresh off the press", targets: [{ account_id: account.id }] }, net.fetcher);
+    expect(post.status).toBe("published");
+    expect(post.targets[0].url).toBe("https://typeshop.tumblr.com/post/730000000000000001");
+    const sent = net.calls.slice(from);
+    expect(sent[0]).toMatchObject({ url: "https://api.tumblr.com/v2/oauth2/token", method: "POST", auth: null });
+    expect(sent[0].body).toEqual({ client_id: "tkey", client_secret: "tumblr-app-secret", grant_type: "refresh_token", refresh_token: spent });
+    const stored = credentialsOf(account.id);
+    expect(sent[1]).toMatchObject({ url: "https://api.tumblr.com/v2/blog/typeshop/posts", method: "POST", auth: `Bearer ${stored.access_token}` });
+    expect(sent[1].body).toEqual({ content: [{ type: "text", text: "Fresh off the press" }], state: "published" });
+    expect(stored.refresh_token).toMatch(/^tmr-/);
+    expect(stored.refresh_token).not.toBe(spent);
+  });
+
+  it("reports Tumblr's own reason when the code is refused, and says so when there is no blog or no refresh token", async () => {
+    const before = listAccounts().length;
+    const badCode = tumblrNet((call) => (call.path.endsWith("/oauth2/token") ? refused({ error: "invalid_grant", error_description: "The authorization code is invalid or has expired." }) : undefined));
+    await expect(finishOAuth("tumblr", begin("tumblr", app).state, "bad", badCode.fetcher)).rejects.toThrow("Tumblr did not complete the sign-in: The authorization code is invalid or has expired.");
+    const noBlogs = tumblrNet((call) => (call.path.endsWith("/user/info") ? { response: { user: { name: "printer", blogs: [] } } } : undefined));
+    await expect(finishOAuth("tumblr", begin("tumblr", app).state, "tm-code", noBlogs.fetcher)).rejects.toThrow("This Tumblr account has no blog it may post to.");
+    const noRefresh = tumblrNet((call) => (call.path.endsWith("/oauth2/token") ? { access_token: "tm-once", expires_in: 2520 } : undefined));
+    await expect(finishOAuth("tumblr", begin("tumblr", app).state, "tm-code", noRefresh.fetcher)).rejects.toThrow(/Tumblr returned no refresh token/);
+    expect(listAccounts().length).toBe(before);
+  });
+
+  it("still connects with a pasted key, secret, refresh token and blog name", async () => {
+    const net = tumblrNet();
+    const account = await connectAccount("tumblr", { ...app, refresh_token: "tm-pasted-refresh", blog: "typeshop.tumblr.com" }, net.fetcher);
+    expect(net.calls[0].body).toEqual({ client_id: "tkey", client_secret: "tumblr-app-secret", grant_type: "refresh_token", refresh_token: "tm-pasted-refresh" });
+    expect(account.handle).toBe("typeshop.tumblr.com");
+    expect(credentialsOf(account.id)).toMatchObject({ blog: "typeshop" });
+    expect(connector("tumblr")!.oauth!.paste.required).toEqual(["consumer_key", "consumer_secret", "refresh_token", "blog"]);
   });
 });

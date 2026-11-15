@@ -5,6 +5,7 @@ import { linkedin } from "./linkedin";
 import { mastodon } from "./mastodon";
 import { facebook, instagram, threads } from "./meta";
 import { devto, lemmy, nostr, pinterest, reddit, tiktok, youtube } from "./more";
+import { tumblr } from "./tumblr";
 import { METRIC_KINDS, type Connector } from "./types";
 import { x } from "./x";
 
@@ -20,6 +21,7 @@ export const connectors: Connector[] = [
   tiktok,
   youtube,
   pinterest,
+  tumblr,
   reddit,
   telegram,
   discord,

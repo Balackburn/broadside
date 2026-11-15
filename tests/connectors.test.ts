@@ -54,7 +54,7 @@ const part = (text: string, root: PartRef, parent?: PartRef, options: Record<str
 describe("registry", () => {
   it("lists every network once, each with setup steps and fields", () => {
     expect(new Set(connectors.map((c) => c.id)).size).toBe(connectors.length);
-    expect(connectors.length).toBe(22);
+    expect(connectors.length).toBe(23);
     for (const c of connectors) {
       expect(c.setup.length, c.id).toBeGreaterThan(0);
       expect(c.fields.length, c.id).toBeGreaterThan(0);
@@ -885,5 +885,117 @@ describe("Listmonk", () => {
       { kind: "clicks", label: "Clicks", value: 9 },
     ]);
     expect(calls).toEqual([{ url: "https://news.example/api/campaigns/12?no_body=true", method: "GET", headers: { authorization: auth }, body: undefined }]);
+  });
+});
+
+describe("Tumblr", () => {
+  const app = { consumer_key: "tumblr-key-2b7e", consumer_secret: "tumblr-secret-c93f" };
+  const signedIn = { ...app, access_token: "tumblr-access-51d0", refresh_token: "tumblr-refresh-a8e2", expires_at: new Date(Date.now() + 30 * 60_000).toISOString(), blog: "sheetpress" };
+  const info = { meta: { status: 200, msg: "OK" }, response: { user: { name: "ada", blogs: [{ name: "sheetpress", title: "Sheet Press", url: "https://sheetpress.tumblr.com/", primary: true }, { name: "sidenotes", title: "", url: "https://sidenotes.tumblr.com/" }] } } };
+
+  it("names the blog it will post to, and refuses one the account does not have", async () => {
+    const { fetcher, calls } = fake(() => info);
+    const profile = await get("tumblr").verify({ ...signedIn, blog: "https://sheetpress.tumblr.com/" }, { fetch: fetcher });
+    expect(profile).toEqual({ handle: "sheetpress.tumblr.com", credentials: { blog: "sheetpress" } });
+    expect(calls).toEqual([{ url: "https://api.tumblr.com/v2/user/info", method: "GET", headers: { authorization: "Bearer tumblr-access-51d0" }, body: undefined }]);
+    const other = await get("tumblr").verify({ ...signedIn, blog: "someone-else" }, { fetch: fetcher }).catch((e) => e);
+    expect(other.message).toBe('This Tumblr account has no blog called "someone-else" that it may post to.');
+  });
+
+  it("offers each blog after a sign-in, and keeps the tokens out of what is shown", async () => {
+    const { fetcher } = fake(() => info);
+    const choices = await get("tumblr").oauth!.choose!.list(signedIn, { fetch: fetcher });
+    expect(choices.map(({ id, name, detail }) => ({ id, name, detail }))).toEqual([
+      { id: "sheetpress", name: "Sheet Press", detail: "sheetpress.tumblr.com" },
+      { id: "sidenotes", name: "sidenotes", detail: "sidenotes.tumblr.com" },
+    ]);
+    expect(choices[1].credentials).toEqual({ ...signedIn, blog: "sidenotes" });
+    expect(get("tumblr").oauth).toMatchObject({ authorizeUrl: "https://www.tumblr.com/oauth2/authorize", tokenUrl: "https://api.tumblr.com/v2/oauth2/token", scopes: ["basic", "write", "offline_access"], pkce: "none", clientAuth: "body" });
+  });
+
+  it("sends each paragraph as a text block, with links marked by code point", async () => {
+    const { fetcher, calls } = fake(() => Response.json({ meta: { status: 201, msg: "Created" }, response: { id: "1234567891234567" } }, { status: 201 }));
+    const result = await get("tumblr").publish(post("Out now 🌳 https://example.com/a.\n\nSecond paragraph", [], { tags: "news, print ", state: "queue" }), signedIn, { fetch: fetcher });
+    expect(result).toEqual({ id: "1234567891234567", url: "https://sheetpress.tumblr.com/post/1234567891234567" });
+    expect(calls).toEqual([
+      {
+        url: "https://api.tumblr.com/v2/blog/sheetpress/posts",
+        method: "POST",
+        headers: { authorization: "Bearer tumblr-access-51d0", "content-type": "application/json" },
+        body: {
+          content: [
+            // The tree is one code point and two UTF-16 units: the link starts at 10, not 11.
+            { type: "text", text: "Out now 🌳 https://example.com/a.", formatting: [{ start: 10, end: 31, type: "link", url: "https://example.com/a" }] },
+            { type: "text", text: "Second paragraph" },
+          ],
+          state: "queue",
+          tags: "news,print",
+        },
+      },
+    ]);
+  });
+
+  it("sends files in the same request, each under the name its block gives it", async () => {
+    const { fetcher, calls } = fake(() => ({ response: { id: "99" } }));
+    await get("tumblr").publish(post("A caption", [png, mp4]), signedIn, { fetch: fetcher });
+    expect(calls[0].method).toBe("POST");
+    expect(calls[0].headers).toEqual({ authorization: "Bearer tumblr-access-51d0" });
+    const form = calls[0].body as Record<string, string>;
+    expect(Object.keys(form)).toEqual(["json", "media-0", "media-1"]);
+    expect(form["media-0"]).toBe("file:sheet.png");
+    expect(form["media-1"]).toBe("file:clip.mp4");
+    expect(JSON.parse(form.json)).toEqual({
+      content: [
+        { type: "image", media: [{ type: "image/png", identifier: "media-0" }], alt_text: "A printed sheet" },
+        { type: "video", media: { type: "video/mp4", identifier: "media-1" } },
+        { type: "text", text: "A caption" },
+      ],
+      state: "published",
+    });
+  });
+
+  it("renews a sign-in that has run out before posting, and hands back the new tokens", async () => {
+    const { fetcher, calls } = fake(({ url }) => (url.endsWith("/oauth2/token") ? { access_token: "tumblr-access-new", refresh_token: "tumblr-refresh-new", expires_in: 2520, token_type: "bearer", scope: "write offline_access" } : { response: { id: "7" } }));
+    const result = await get("tumblr").publish(post("Hello"), { ...app, refresh_token: "tumblr-refresh-a8e2", blog: "sheetpress" }, { fetch: fetcher });
+    expect(calls[0]).toEqual({
+      url: "https://api.tumblr.com/v2/oauth2/token",
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: { client_id: "tumblr-key-2b7e", client_secret: "tumblr-secret-c93f", grant_type: "refresh_token", refresh_token: "tumblr-refresh-a8e2" },
+    });
+    expect(calls[1].headers.authorization).toBe("Bearer tumblr-access-new");
+    expect(result.credentials).toMatchObject({ access_token: "tumblr-access-new", refresh_token: "tumblr-refresh-new", blog: "sheetpress" });
+    expect(Date.parse(result.credentials!.expires_at)).toBeGreaterThan(Date.now() + 40 * 60_000);
+  });
+
+  it("refuses what Tumblr would not take, before calling it", async () => {
+    expect(problems(get("tumblr"), "a".repeat(4097), [])).toEqual(["Tumblr allows 4096 characters; this is 4097."]);
+    expect(problems(get("tumblr"), "t", Array(31).fill({ type: "image", hasPublicUrl: false }))).toEqual(["Tumblr allows 30 images; this has 31."]);
+    expect(problems(get("tumblr"), "t", Array(2).fill({ type: "video", hasPublicUrl: false }))).toEqual(["Tumblr allows 1 video; this has 2."]);
+    expect(threadProblems(fits(get("tumblr")), ["a second part"])).toEqual(["Tumblr cannot post a thread."]);
+    const { fetcher, calls } = fake(() => ({ response: { id: "1" } }));
+    // 2,100 family emoji are 2,100 characters to a reader and 10,500 code points to Tumblr.
+    const tooLong = await get("tumblr").publish(post(`fine\n${"👨‍👨‍👦".repeat(2100)}`), signedIn, { fetch: fetcher }).catch((e) => e);
+    expect(tooLong).toBeInstanceOf(PublishError);
+    expect(tooLong.message).toBe("Tumblr allows 4,096 characters in one paragraph; paragraph 2 is 10500. Break it into shorter paragraphs.");
+    expect(calls).toEqual([]);
+  });
+
+  it("quotes Tumblr's own error, from its list or from its status line, and never a key or token", async () => {
+    const bad = fake(() => Response.json({ meta: { status: 400, msg: "Bad Request" }, errors: [{ title: "'content' must be an array'", code: 8001 }] }, { status: 400 }));
+    const invalid = await get("tumblr").publish(post("Hello"), signedIn, { fetch: bad.fetcher }).catch((e) => e);
+    expect(invalid.message).toBe("Tumblr answered 400: 'content' must be an array'");
+    const denied = fake(() => Response.json({ meta: { status: 401, msg: "Unauthorized" }, response: [] }, { status: 401 }));
+    const unauthorized = await get("tumblr").publish(post("Hello"), signedIn, { fetch: denied.fetcher }).catch((e) => e);
+    expect(unauthorized.message).toBe("Tumblr answered 401: Unauthorized");
+    expect(unauthorized.retryable).toBe(false);
+    const limited = fake(() => Response.json({ meta: { status: 429, msg: "Limit Exceeded" }, response: [] }, { status: 429, headers: { "retry-after": "30" } }));
+    const slow = await get("tumblr").publish(post("Hello"), signedIn, { fetch: limited.fetcher }).catch((e) => e);
+    expect([slow.message, slow.retryable, slow.retryAfter]).toEqual(["Tumblr answered 429: Limit Exceeded", true, 30]);
+    const spent = fake(() => Response.json({ error: "invalid_grant", error_description: "Refresh token has expired" }, { status: 401 }));
+    const expired = await get("tumblr").publish(post("Hello"), { ...app, refresh_token: "tumblr-refresh-spent-77", blog: "sheetpress" }, { fetch: spent.fetcher }).catch((e) => e);
+    expect(expired.message).toBe("Tumblr would not renew the sign-in: Refresh token has expired. Reconnect the account.");
+    expect(expired.reconnect).toBe(true);
+    for (const thrown of [invalid, unauthorized, slow, expired]) expect(leaks(thrown, app.consumer_key, app.consumer_secret, signedIn.access_token, signedIn.refresh_token, "tumblr-refresh-spent-77")).toBe(false);
   });
 });

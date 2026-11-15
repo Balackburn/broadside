@@ -1,4 +1,4 @@
-import { siBluesky, siDevdotto, siDiscord, siFacebook, siGhost, siInstagram, siLemmy, siListmonk, siMastodon, siPinterest, siReddit, siTelegram, siThreads, siTiktok, siWordpress, siX, siYoutube } from "simple-icons";
+import { siBluesky, siDevdotto, siDiscord, siFacebook, siGhost, siInstagram, siLemmy, siListmonk, siMastodon, siPinterest, siReddit, siTelegram, siThreads, siTiktok, siTumblr, siWordpress, siX, siYoutube } from "simple-icons";
 
 /**
  * Each network's own mark, from the CC0 Simple Icons set, drawn in the
@@ -16,6 +16,7 @@ const PATHS: Record<string, string> = {
   tiktok: siTiktok.path,
   youtube: siYoutube.path,
   pinterest: siPinterest.path,
+  tumblr: siTumblr.path,
   reddit: siReddit.path,
   telegram: siTelegram.path,
   discord: siDiscord.path,
