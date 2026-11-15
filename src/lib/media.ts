@@ -15,12 +15,23 @@ export type Media = {
   alt: string | null;
   source_url: string | null;
   created_at: string;
+  /** "generated" for an image made from a prompt; "upload" for everything uploaded or imported. */
+  origin: "upload" | "generated";
+  /** For a generated image: the prompt it was made from and the model that made it. Text a person typed, shown as text. */
+  prompt: string | null;
+  model: string | null;
+  /** In a team, the name of the member who generated it. Null otherwise. */
+  made_by: string | null;
   type: "image" | "video";
   url: string;
   public_url: string | null;
 };
 
 type MediaRow = Omit<Media, "type" | "url" | "public_url">;
+
+/** A media row as it is read: the file's own columns, with the member who generated it by name. The member's id stays in the database. */
+const ROWS = `SELECT m.id, m.filename, m.content_type, m.size, m.alt, m.source_url, m.created_at, m.origin, m.prompt, m.model,
+  (SELECT name FROM members WHERE members.id = m.created_by) AS made_by FROM media m`;
 
 const ALLOWED = ["image/jpeg", "image/png", "image/webp", "image/gif", "video/mp4", "video/quicktime", "video/webm"];
 const MAX_BYTES = Number(process.env.BROADSIDE_MAX_UPLOAD_MB ?? 512) * 1024 * 1024;
@@ -67,7 +78,10 @@ function view(row: MediaRow): Media {
   };
 }
 
-export function saveMedia(bytes: Uint8Array, filename: string, contentType: string, extra: { alt?: string; sourceUrl?: string } = {}): Media {
+/** What a generated image carries beside the file: the prompt, the model, and in a team the member who asked. */
+export type Generated = { prompt: string; model: string; createdBy?: string | null };
+
+export function saveMedia(bytes: Uint8Array, filename: string, contentType: string, extra: { alt?: string; sourceUrl?: string; generated?: Generated } = {}): Media {
   const type = contentType.split(";")[0].trim().toLowerCase();
   if (!ALLOWED.includes(type)) throw new InputError(`Broadside accepts JPEG, PNG, WebP, GIF, MP4, MOV and WebM; this file is ${type || "of an unknown type"}.`);
   if (bytes.length === 0) throw new InputError("That file is empty.");
@@ -78,7 +92,7 @@ export function saveMedia(bytes: Uint8Array, filename: string, contentType: stri
   const id = newId("med");
   writeFileSync(path.join(folder(), id), bytes);
   run(
-    "INSERT INTO media (id, filename, content_type, size, alt, source_url, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    "INSERT INTO media (id, filename, content_type, size, alt, source_url, created_at, origin, prompt, model, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     id,
     safeName(filename),
     actual,
@@ -86,6 +100,10 @@ export function saveMedia(bytes: Uint8Array, filename: string, contentType: stri
     extra.alt ?? null,
     extra.sourceUrl ?? null,
     now(),
+    extra.generated ? "generated" : "upload",
+    extra.generated?.prompt ?? null,
+    extra.generated?.model ?? null,
+    extra.generated?.createdBy ?? null,
   );
   return getMedia(id)!;
 }
@@ -113,12 +131,12 @@ export async function importMedia(sourceUrl: string, alt?: string, fetcher: type
 
 export function getMedia(id: string): Media | undefined {
   if (!isId(id)) return undefined;
-  const row = get<MediaRow>("SELECT * FROM media WHERE id = ?", id);
+  const row = get<MediaRow>(`${ROWS} WHERE m.id = ?`, id);
   return row && view(row);
 }
 
 export function listMedia(limit = 60): Media[] {
-  return all<MediaRow>("SELECT * FROM media ORDER BY created_at DESC, rowid DESC LIMIT ?", limit).map(view);
+  return all<MediaRow>(`${ROWS} ORDER BY m.created_at DESC, m.rowid DESC LIMIT ?`, limit).map(view);
 }
 
 /** One post that carries a file. `waiting` is true while any part of that post has yet to go out. */

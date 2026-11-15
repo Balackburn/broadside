@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 const dataDir = mkdtempSync(path.join(tmpdir(), "broadside-roles-"));
 process.env.BROADSIDE_DATA_DIR = dataDir;
@@ -79,6 +79,7 @@ const EXPECTED: Record<string, Record<string, string>> = {
   "/api/v1/analytics": { GET: V },
   "/api/v1/media": { GET: V, POST: E },
   "/api/v1/media/[id]": { PATCH: E, DELETE: E },
+  "/api/v1/media/generate": { GET: V, POST: E },
   "/api/v1/tags": { GET: V, POST: E },
   "/api/v1/tags/[id]": { PATCH: E, DELETE: E },
   "/api/v1/groups": { GET: V, POST: E },
@@ -115,6 +116,7 @@ const EXPECTED_TOOLS: Record<string, Role> = {
   list_feeds: "viewer",
   list_outgoing_webhooks: "viewer",
   upload_media: "editor",
+  generate_image: "editor",
   create_post: "editor",
   update_post: "editor",
   publish_post: "editor",
@@ -217,11 +219,11 @@ describe("in a team", () => {
   const matrix = guarded.flatMap((r) => ROLES.map((caller) => ({ ...r, caller })));
 
   it("walks every route and method", () => {
-    // 42 routes and 69 methods, of which the five open ones and the callback are checked elsewhere.
-    expect(Object.keys(EXPECTED)).toHaveLength(42);
-    expect(routes).toHaveLength(69);
-    expect(guarded).toHaveLength(63);
-    expect(matrix).toHaveLength(63 * 4);
+    // 43 routes and 71 methods, of which the five open ones and the callback are checked elsewhere.
+    expect(Object.keys(EXPECTED)).toHaveLength(43);
+    expect(routes).toHaveLength(71);
+    expect(guarded).toHaveLength(65);
+    expect(matrix).toHaveLength(65 * 4);
   });
 
   it.each(matrix)("$method $address as $caller from the app (needs $role)", async ({ address, method, role, caller }) => {
@@ -450,16 +452,34 @@ describe("MCP tools check the same roles", () => {
   afterEach(() => {
     delete process.env.BROADSIDE_MCP_DRAFTS_ONLY;
     delete process.env.BROADSIDE_API_KEY;
+    process.env.OPENAI_API_KEY = "";
+    vi.unstubAllGlobals();
   });
+  /** Turns image generation on with a made-up key, and makes any request that tried to leave fail the test. */
+  const withImages = () => {
+    process.env.OPENAI_API_KEY = "sk-test-not-a-real-key";
+    vi.stubGlobal("fetch", () => {
+      throw new Error("a roles test tried to reach the network");
+    });
+  };
   const keyOf = (role: Role) => keys[role].authorization.slice(7);
   const as = (role: Role) => agent(() => tokenActor(keyOf(role)));
   const refusedByRole = (reply: ToolReply) => reply.isError === true && /needs the \w+ role, and this key has \w+/.test(reply.content[0].text);
 
   it("gives every tool a role, and the table is the one the README prints", async () => {
     expect(TOOL_ROLES).toEqual(EXPECTED_TOOLS);
+    // generate_image has its role in the table either way, and is offered only once the operator has set a key.
     const { client } = await as("owner");
     const offered = (await client.listTools()).tools.map((t) => t.name).sort();
-    expect(offered).toEqual(Object.keys(EXPECTED_TOOLS).sort());
+    expect(offered).toEqual(Object.keys(EXPECTED_TOOLS).filter((name) => name !== "generate_image").sort());
+    expect((await (await as("owner")).tool("generate_image", { prompt: "a lighthouse" })).isError).toBe(true);
+    withImages();
+    const withKey = (await (await as("owner")).client.listTools()).tools.map((t) => t.name).sort();
+    expect(withKey).toEqual(Object.keys(EXPECTED_TOOLS).sort());
+    // A cap of zero turns it off again, key or no key.
+    process.env.BROADSIDE_IMAGE_DAILY_LIMIT = "0";
+    expect((await (await as("owner")).client.listTools()).tools.map((t) => t.name)).not.toContain("generate_image");
+    process.env.BROADSIDE_IMAGE_DAILY_LIMIT = "";
   });
 
   it("draws the line where the REST API draws it", () => {
@@ -468,6 +488,7 @@ describe("MCP tools check the same roles", () => {
       ["list_accounts", "/api/v1/accounts", "GET"],
       ["disconnect_account", "/api/v1/accounts/[id]", "DELETE"],
       ["upload_media", "/api/v1/media", "POST"],
+      ["generate_image", "/api/v1/media/generate", "POST"],
       ["list_media", "/api/v1/media", "GET"],
       ["check_post", "/api/v1/check", "POST"],
       ["create_post", "/api/v1/posts", "POST"],
@@ -501,6 +522,8 @@ describe("MCP tools check the same roles", () => {
       get_post: { post_id: draft.id },
       get_post_analytics: { post_id: draft.id },
       upload_media: {},
+      // A prompt of spaces is refused before anything is counted or sent, so only the role can stop this call earlier.
+      generate_image: { prompt: "   " },
       create_post: { content: "made on the walk", targets: [{ account_id: sandbox }], draft: true },
       update_post: { post_id: draft.id, content: "for the walk" },
       publish_post: { post_id: "post_missing" },
@@ -511,6 +534,7 @@ describe("MCP tools check the same roles", () => {
       connect_account: { platform: "x" },
       disconnect_account: { account_id: "acc_missing" },
     };
+    withImages();
     let walked = 0;
     for (const caller of ROLES) {
       const { tool } = await as(caller);
@@ -521,7 +545,8 @@ describe("MCP tools check the same roles", () => {
         walked++;
       }
     }
-    expect(walked).toBe(23 * 4);
+    expect(walked).toBe(24 * 4);
+    expect(all("SELECT id FROM image_generations")).toHaveLength(0);
   });
 
   it("lets a viewer's key list and read, and not create or publish", async () => {

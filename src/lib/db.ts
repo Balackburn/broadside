@@ -115,6 +115,12 @@ const ADDED: [table: string, column: string, definition: string][] = [
   ["posts", "created_by", "TEXT"],
   ["api_keys", "member_id", "TEXT"],
   ["api_keys", "role", "TEXT"],
+  // Generated images: where a file came from ('upload' for everything uploaded or imported, 'generated' for one made from a prompt),
+  // the prompt and the model that made it, and in a team the member who asked for it.
+  ["media", "origin", "TEXT NOT NULL DEFAULT 'upload'"],
+  ["media", "prompt", "TEXT"],
+  ["media", "model", "TEXT"],
+  ["media", "created_by", "TEXT"],
 ];
 
 /**
@@ -132,6 +138,12 @@ const ADDED: [table: string, column: string, definition: string][] = [
  * target, when a reading was last tried and why the last try failed, if it
  * did. `metric_backoff` holds the accounts a network has asked
  * Broadside to slow down for, and until when.
+ *
+ * `image_generations` is the daily cap on generated images: one row per image
+ * asked for, under the UTC day it was asked on. A row is written before the
+ * provider is called and removed if the call fails, so the count for a day is
+ * the images paid for plus the ones being made right now. Deleting a generated
+ * file does not remove its row: the image was still billed.
  */
 const ADDED_TABLES = `
 CREATE TABLE IF NOT EXISTS tags (
@@ -263,6 +275,15 @@ CREATE TABLE IF NOT EXISTS members (
   disabled_at TEXT,
   last_seen_at TEXT
 );
+CREATE TABLE IF NOT EXISTS image_generations (
+  id TEXT PRIMARY KEY,
+  day TEXT NOT NULL,
+  status TEXT NOT NULL,
+  media_id TEXT,
+  created_by TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS image_generations_day ON image_generations(day);
 CREATE TABLE IF NOT EXISTS invites (
   id TEXT PRIMARY KEY,
   token_hash TEXT NOT NULL UNIQUE,
