@@ -23,6 +23,9 @@ const BRINGS: Record<string, string> = {
   devto: "An API key",
   lemmy: "Your login",
   reddit: "A script app",
+  wordpress: "An application password",
+  ghost: "An Admin API key",
+  listmonk: "An API user's token",
 };
 
 const MCP_SNIPPET = `claude mcp add --transport http broadside \\

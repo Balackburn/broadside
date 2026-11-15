@@ -1,4 +1,5 @@
 import { bluesky } from "./bluesky";
+import { ghost, listmonk, wordpress } from "./blogs";
 import { discord, sandbox, slack, telegram, webhook } from "./chat";
 import { linkedin } from "./linkedin";
 import { mastodon } from "./mastodon";
@@ -26,6 +27,9 @@ export const connectors: Connector[] = [
   nostr,
   lemmy,
   devto,
+  wordpress,
+  ghost,
+  listmonk,
   webhook,
   sandbox,
 ];

@@ -1,4 +1,4 @@
-import { siBluesky, siDevdotto, siDiscord, siFacebook, siInstagram, siLemmy, siMastodon, siPinterest, siReddit, siTelegram, siThreads, siTiktok, siX, siYoutube } from "simple-icons";
+import { siBluesky, siDevdotto, siDiscord, siFacebook, siGhost, siInstagram, siLemmy, siListmonk, siMastodon, siPinterest, siReddit, siTelegram, siThreads, siTiktok, siWordpress, siX, siYoutube } from "simple-icons";
 
 /**
  * Each network's own mark, from the CC0 Simple Icons set, drawn in the
@@ -21,6 +21,9 @@ const PATHS: Record<string, string> = {
   discord: siDiscord.path,
   lemmy: siLemmy.path,
   devto: siDevdotto.path,
+  wordpress: siWordpress.path,
+  ghost: siGhost.path,
+  listmonk: siListmonk.path,
   // Generic glyphs for destinations that are not a brand.
   webhook: "M10 2a5 5 0 0 0-2.6 9.3l-3 5.2A3 3 0 1 0 6.1 18l4-7-1-.6A3 3 0 1 1 13 8h2a5 5 0 0 0-5-6Zm8 9a5 5 0 0 0-2 .4l-3-5.2a3 3 0 1 0-1.7 1l4 7 1-.6A3 3 0 1 1 18 19v2a5 5 0 0 0 0-10ZM6 13a5 5 0 1 0 5 5h6.2a3 3 0 1 0 0-2H9v1a3 3 0 1 1-3-3v-1Z",
   sandbox: "M12 2 3 6.5v11L12 22l9-4.5v-11L12 2Zm0 2.2 6.3 3.2L12 10.6 5.7 7.4 12 4.2ZM5 9.1l6 3v7.3l-6-3V9.1Zm14 0v7.3l-6 3v-7.3l6-3Z",

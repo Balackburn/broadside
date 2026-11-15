@@ -1,6 +1,9 @@
+import { createHmac } from "node:crypto";
 import { schnorr } from "@noble/curves/secp256k1.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { guardedFetch } from "@/lib/net";
 import { connector, connectors, fits, measure, problems, threadProblems } from "@/lib/platforms";
+import { ghostToken, textToHtml } from "@/lib/platforms/blogs";
 import { facets } from "@/lib/platforms/bluesky";
 import { apiVersion, escapeLittleText } from "@/lib/platforms/linkedin";
 import { nostrEvent, nostrSecret, replyTags, titleAndBody } from "@/lib/platforms/more";
@@ -51,7 +54,7 @@ const part = (text: string, root: PartRef, parent?: PartRef, options: Record<str
 describe("registry", () => {
   it("lists every network once, each with setup steps and fields", () => {
     expect(new Set(connectors.map((c) => c.id)).size).toBe(connectors.length);
-    expect(connectors.length).toBeGreaterThanOrEqual(19);
+    expect(connectors.length).toBe(22);
     for (const c of connectors) {
       expect(c.setup.length, c.id).toBeGreaterThan(0);
       expect(c.fields.length, c.id).toBeGreaterThan(0);
@@ -605,5 +608,282 @@ describe("threads: Nostr", () => {
 
     await get("nostr").reply!(part("second", { id: rootId }), creds, { fetch });
     expect(events[1].tags).toEqual([["e", rootId, "", "root"], ["p", author]]);
+  });
+});
+
+/** True when a thrown message holds any of these secrets, as written or as the Basic header carries them. */
+const leaks = (error: unknown, ...secrets: string[]): boolean => secrets.some((secret) => String((error as Error).message).includes(secret) || String((error as Error).message).includes(Buffer.from(secret).toString("base64")));
+const images = (n: number) => Array(n).fill({ type: "image", hasPublicUrl: false });
+
+describe("articles: turning a post into a title and a body", () => {
+  it("writes paragraphs, line breaks and links, and escapes everything else", () => {
+    expect(textToHtml("One & <b>two</b>\nsame paragraph\n\nRead https://example.com/a?b=1&c=2. Then \"stop\".")).toBe(
+      '<p>One &amp; &lt;b&gt;two&lt;/b&gt;<br>same paragraph</p>\n<p>Read <a href="https://example.com/a?b=1&amp;c=2">https://example.com/a?b=1&amp;c=2</a>. Then &quot;stop&quot;.</p>',
+    );
+    expect(textToHtml("  \n\n ")).toBe("");
+  });
+
+  it("refuses a post with no title instead of making one up", async () => {
+    const { fetcher, calls } = fake(() => ({}));
+    const wp = await get("wordpress").publish(post("", [png]), { site: "https://blog.example", username: "ada", application_password: "abcd efgh" }, { fetch: fetcher }).catch((e) => e);
+    expect(wp).toBeInstanceOf(PublishError);
+    expect(wp.message).toBe("WordPress needs a title. Write it as the first line of the post, or set the Title option for this account.");
+    const gh = await get("ghost").publish(post("\nbody only"), { url: "https://ghost.example", admin_api_key: "id:00ff" }, { fetch: fetcher }).catch((e) => e);
+    expect(gh.message).toBe("Ghost needs a title. Write it as the first line of the post, or set the Title option for this account.");
+    const lm = await get("listmonk").publish(post("", [png]), { url: "https://news.example", api_user: "bot", api_token: "tok", list_ids: "1" }, { fetch: fetcher }).catch((e) => e);
+    expect(lm.message).toBe("Listmonk needs a subject. Write it as the first line of the post, or set the Subject option for this account.");
+    expect(calls).toEqual([]);
+  });
+
+  it("holds each to its limits before anything is sent", () => {
+    for (const id of ["wordpress", "ghost", "listmonk"]) {
+      const name = get(id).name;
+      expect(problems(get(id), "a".repeat(100_001), []), id).toEqual([`${name} allows 100000 characters; this is 100001.`]);
+      expect(problems(get(id), "t", images(11)), id).toEqual([`${name} allows 10 images; this has 11.`]);
+      expect(problems(get(id), "t", [{ type: "video", hasPublicUrl: false }]), id).toEqual([`${name} does not take video here.`]);
+      expect(problems(get(id), "t", images(10)), id).toEqual([]);
+      expect(threadProblems(fits(get(id)), ["a second part"]), id).toEqual([get(id).noThread]);
+    }
+  });
+
+  it("will not call a site address that points inside a private network", async () => {
+    const allowed = process.env.BROADSIDE_ALLOW_PRIVATE_FETCH;
+    delete process.env.BROADSIDE_ALLOW_PRIVATE_FETCH;
+    try {
+      const { fetcher, calls } = fake(() => ({}));
+      const ctx = { fetch: guardedFetch(fetcher) };
+      const refusals = await Promise.all([
+        get("wordpress").verify({ site: "http://127.0.0.1:8080", username: "ada", application_password: "abcd efgh" }, ctx).catch((e) => e),
+        get("ghost").verify({ url: "http://192.168.1.20:2368", admin_api_key: "id:00ff" }, ctx).catch((e) => e),
+        get("listmonk").verify({ url: "http://[::1]:9000", api_user: "bot", api_token: "tok", lists: "1" }, ctx).catch((e) => e),
+      ]);
+      for (const refusal of refusals) {
+        expect(refusal).toBeInstanceOf(PublishError);
+        expect(refusal.message).toMatch(/could not be reached: .* points inside a private network, so Broadside will not fetch it\./);
+      }
+      expect(calls).toEqual([]);
+    } finally {
+      if (allowed !== undefined) process.env.BROADSIDE_ALLOW_PRIVATE_FETCH = allowed;
+    }
+  });
+});
+
+describe("WordPress", () => {
+  const creds = { site: "https://blog.example/", username: "ada", application_password: "abcd EFGH 1234 ijkl" };
+  const basic = `Basic ${Buffer.from("ada:abcd EFGH 1234 ijkl").toString("base64")}`;
+
+  it("asks the site who the application password belongs to", async () => {
+    const { fetcher, calls } = fake(() => ({ id: 3, name: "Ada L.", avatar_urls: { "24": "https://blog.example/a24.png", "96": "https://blog.example/a96.png" } }));
+    const profile = await get("wordpress").verify(creds, { fetch: fetcher });
+    expect(profile).toEqual({ handle: "Ada L. at blog.example", avatarUrl: "https://blog.example/a96.png" });
+    expect(calls).toEqual([{ url: "https://blog.example/wp-json/wp/v2/users/me", method: "GET", headers: { authorization: basic }, body: undefined }]);
+  });
+
+  it("uploads each image, then creates the article with the first as its featured image", async () => {
+    const { fetcher, calls } = fake(({ url }) => {
+      if (url.endsWith("/media")) return { id: 40 + calls.length, source_url: `https://blog.example/wp-content/uploads/${calls.length}.png` };
+      return { id: 77, link: "https://blog.example/2026/11/a-launch/" };
+    });
+    const second = { ...png, id: "med_3", filename: "second.png", alt: 'Two "sheets"' };
+    const result = await get("wordpress").publish(post("A launch\n\nIt is out. See https://example.com/notes.", [png, second]), creds, { fetch: fetcher });
+    expect(result).toEqual({ id: "77", url: "https://blog.example/2026/11/a-launch/" });
+    expect(calls.map((c) => `${c.method} ${c.url}`)).toEqual(["POST https://blog.example/wp-json/wp/v2/media", "POST https://blog.example/wp-json/wp/v2/media", "POST https://blog.example/wp-json/wp/v2/posts"]);
+    expect(calls[0].headers.authorization).toBe(basic);
+    expect(calls[0].body).toEqual({ file: "file:sheet.png", alt_text: "A printed sheet" });
+    expect(calls[1].body).toEqual({ file: "file:second.png", alt_text: 'Two "sheets"' });
+    expect(calls[2].headers).toEqual({ authorization: basic, "content-type": "application/json" });
+    expect(calls[2].body).toEqual({
+      title: "A launch",
+      content: '<p>It is out. See <a href="https://example.com/notes">https://example.com/notes</a>.</p>\n<figure><img src="https://blog.example/wp-content/uploads/2.png" alt="Two &quot;sheets&quot;"></figure>',
+      status: "publish",
+      featured_media: 41,
+    });
+  });
+
+  it("takes the title and the status from the options when they are given", async () => {
+    const { fetcher, calls } = fake(() => ({ id: 5, link: "https://blog.example/?p=5" }));
+    await get("wordpress").publish(post("All of this is the body", [], { title: "Given title", status: "draft" }), creds, { fetch: fetcher });
+    expect(calls[0].body).toEqual({ title: "Given title", content: "<p>All of this is the body</p>", status: "draft" });
+    await get("wordpress").publish(post("Only a line", [], { status: "no such status" }), creds, { fetch: fetcher });
+    expect(calls[1].body).toEqual({ title: "Only a line", content: "", status: "publish" });
+  });
+
+  it("quotes the site's refusal, and never the password", async () => {
+    const denied = fake(() => Response.json({ code: "rest_cannot_create", message: "Sorry, you are not allowed to create posts as this user.", data: { status: 401 } }, { status: 401 }));
+    const error = await get("wordpress").publish(post("Title\nBody"), creds, { fetch: denied.fetcher }).catch((e) => e);
+    expect(error).toBeInstanceOf(PublishError);
+    expect(error.message).toBe("WordPress answered 401: Sorry, you are not allowed to create posts as this user.");
+    expect(error.retryable).toBe(false);
+    const tooBig = fake(() => Response.json({ code: "rest_upload_file_too_big", message: "File is too big." }, { status: 413 }));
+    expect((await get("wordpress").publish(post("Title", [png]), creds, { fetch: tooBig.fetcher }).catch((e) => e)).message).toBe("WordPress answered 413: File is too big.");
+    expect(tooBig.calls).toHaveLength(1);
+    const down = fake(() => new Response("<html>Bad gateway</html>", { status: 502 }));
+    const unavailable = await get("wordpress").verify(creds, { fetch: down.fetcher }).catch((e) => e);
+    expect(unavailable.retryable).toBe(true);
+    const unreachable = await get("wordpress").verify(creds, { fetch: (async () => { throw new Error("getaddrinfo ENOTFOUND blog.example"); }) as typeof fetch }).catch((e) => e);
+    expect(unreachable.message).toBe("WordPress could not be reached: getaddrinfo ENOTFOUND blog.example");
+    for (const thrown of [error, unavailable, unreachable]) expect(leaks(thrown, creds.application_password, "ada:abcd EFGH 1234 ijkl")).toBe(false);
+  });
+});
+
+describe("Ghost", () => {
+  const secret = "00112233445566778899aabbccddeeff";
+  const creds = { url: "https://example.ghost.io/ghost/", admin_api_key: `6489f0c2a1:${secret}` };
+  const decoded = (part: string) => JSON.parse(Buffer.from(part, "base64url").toString("utf8"));
+
+  it("signs a five-minute token with the secret half of the key, as bytes", () => {
+    const [header, payload, signature] = ghostToken(creds.admin_api_key, 1_700_000_000_000).split(".");
+    expect(decoded(header)).toEqual({ alg: "HS256", typ: "JWT", kid: "6489f0c2a1" });
+    expect(decoded(payload)).toEqual({ iat: 1_700_000_000, exp: 1_700_000_300, aud: "/admin/" });
+    expect(signature).toBe(createHmac("sha256", Buffer.from(secret, "hex")).update(`${header}.${payload}`).digest("base64url"));
+  });
+
+  it("refuses a key of the wrong shape without repeating it", () => {
+    for (const bad of ["not-a-key-at-all-5f3a", `only:${secret}:extra`, "id:nothex-5f3a"]) {
+      let thrown: unknown;
+      try {
+        ghostToken(bad);
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toBeInstanceOf(PublishError);
+      expect((thrown as Error).message).toBe("That does not look like a Ghost Admin API key. It is two parts joined by a colon, as Ghost shows it for a custom integration.");
+    }
+  });
+
+  it("reads the site's name, then proves the key with a call that needs it", async () => {
+    const { fetcher, calls } = fake(({ url }) => (url.endsWith("/site/") ? { site: { title: "The Daily Sheet", url: "https://sheet.example/", version: "6.1" } } : { posts: [], meta: {} }));
+    const profile = await get("ghost").verify(creds, { fetch: fetcher });
+    expect(profile).toEqual({ handle: "The Daily Sheet" });
+    expect(calls[0]).toEqual({ url: "https://example.ghost.io/ghost/api/admin/site/", method: "GET", headers: {}, body: undefined });
+    expect(calls[1].url).toBe("https://example.ghost.io/ghost/api/admin/posts/?limit=1&fields=id");
+    expect(calls[1].headers.authorization).toMatch(/^Ghost [\w-]+\.[\w-]+\.[\w-]+$/);
+    expect(calls[1].headers["accept-version"]).toBe("v5.0");
+  });
+
+  it("uploads the images, then creates the article from HTML", async () => {
+    const { fetcher, calls } = fake(({ url }) => {
+      if (url.endsWith("/images/upload/")) return { images: [{ url: `https://example.ghost.io/content/images/${calls.length}.png`, ref: "sheet.png" }] };
+      return { posts: [{ id: "5ddc9141c35e7700383b2937", url: "https://sheet.example/a-launch/", status: "published" }] };
+    });
+    const result = await get("ghost").publish(post("A launch\nIt is out.\n\nMore at https://example.com", [png, { ...png, alt: undefined }], { tags: "News, Launches" }), creds, { fetch: fetcher });
+    expect(result).toEqual({ id: "5ddc9141c35e7700383b2937", url: "https://sheet.example/a-launch/" });
+    expect(calls[0].url).toBe("https://example.ghost.io/ghost/api/admin/images/upload/");
+    expect(calls[0].method).toBe("POST");
+    expect(calls[0].body).toEqual({ file: "file:sheet.png", ref: "sheet.png" });
+    expect(calls[2].url).toBe("https://example.ghost.io/ghost/api/admin/posts/?source=html");
+    expect(calls[2].method).toBe("POST");
+    expect(calls[2].headers["content-type"]).toBe("application/json");
+    expect(calls[2].headers["accept-version"]).toBe("v5.0");
+    const [header, payload] = calls[2].headers.authorization.replace(/^Ghost /, "").split(".");
+    expect(decoded(header).kid).toBe("6489f0c2a1");
+    expect(decoded(payload).aud).toBe("/admin/");
+    expect(calls[2].body).toEqual({
+      posts: [
+        {
+          title: "A launch",
+          html: '<p>It is out.</p>\n<p>More at <a href="https://example.com">https://example.com</a></p>\n<figure><img src="https://example.ghost.io/content/images/2.png" alt=""></figure>',
+          status: "published",
+          tags: ["News", "Launches"],
+          feature_image: "https://example.ghost.io/content/images/1.png",
+          feature_image_alt: "A printed sheet",
+        },
+      ],
+    });
+  });
+
+  it("can leave the article as a draft, and sends a title alone when that is all there is", async () => {
+    const { fetcher, calls } = fake(() => ({ posts: [{ id: "abc" }] }));
+    const result = await get("ghost").publish(post("Just a title", [], { status: "draft" }), creds, { fetch: fetcher });
+    expect(result).toEqual({ id: "abc", url: undefined });
+    expect(calls[0].body).toEqual({ posts: [{ title: "Just a title", status: "draft" }] });
+  });
+
+  it("quotes Ghost's own error from its list of errors, and never the key", async () => {
+    const { fetcher } = fake(() => Response.json({ errors: [{ message: "Unknown Admin API Key", errorType: "UnauthorizedError" }] }, { status: 401 }));
+    const error = await get("ghost").publish(post("Title\nBody"), creds, { fetch: fetcher }).catch((e) => e);
+    expect(error.message).toBe("Ghost answered 401: Unknown Admin API Key");
+    expect(error.retryable).toBe(false);
+    const invalid = fake(() => Response.json({ errors: [{ message: "Validation error, cannot save post.", errorType: "ValidationError" }] }, { status: 422 }));
+    expect((await get("ghost").publish(post("Title\nBody"), creds, { fetch: invalid.fetcher }).catch((e) => e)).message).toBe("Ghost answered 422: Validation error, cannot save post.");
+    const empty = fake(() => ({ posts: [] }));
+    const nothing = await get("ghost").publish(post("Title"), creds, { fetch: empty.fetcher }).catch((e) => e);
+    expect(nothing.message).toBe("Ghost accepted the article but returned nothing about it.");
+    for (const thrown of [error, nothing]) expect(leaks(thrown, secret, creds.admin_api_key)).toBe(false);
+  });
+});
+
+describe("Listmonk", () => {
+  const creds = { url: "https://news.example/", api_user: "broadside", api_token: "lm-token-91c4", lists: "Default list, 3", list_ids: "1,3" };
+  const auth = "token broadside:lm-token-91c4";
+  const lists = { data: { results: [{ id: 1, name: "Default list" }, { id: 3, name: "Insiders" }, { id: 4, name: "Old" }] } };
+
+  it("finds the lists by name or by number and keeps their numbers", async () => {
+    const { fetcher, calls } = fake(() => lists);
+    const profile = await get("listmonk").verify({ ...creds, lists: "default LIST, 3", list_ids: "" }, { fetch: fetcher });
+    expect(profile).toEqual({ handle: "Default list, Insiders at news.example", credentials: { list_ids: "1,3" } });
+    expect(calls).toEqual([{ url: "https://news.example/api/lists?minimal=true&per_page=all", method: "GET", headers: { authorization: auth }, body: undefined }]);
+    const unknown = await get("listmonk").verify({ ...creds, lists: "Nobody" }, { fetch: fetcher }).catch((e) => e);
+    expect(unknown.message).toBe('This Listmonk has no list called "Nobody" that the API user may see.');
+    const none = await get("listmonk").verify({ ...creds, lists: " , " }, { fetch: fetcher }).catch((e) => e);
+    expect(none.message).toBe("Name at least one list to send to.");
+  });
+
+  it("creates the campaign, then starts it", async () => {
+    const { fetcher, calls } = fake(({ url }) => (url.endsWith("/status") ? { data: { id: 12, status: "running" } } : { data: { id: 12, status: "draft" } }));
+    const result = await get("listmonk").publish(post("November notes\n\nHello & welcome.\nRead https://example.com/n"), { ...creds, from_email: "News <news@example.com>" }, { fetch: fetcher });
+    expect(result).toEqual({ id: "12" });
+    expect(calls[0]).toEqual({
+      url: "https://news.example/api/campaigns",
+      method: "POST",
+      headers: { authorization: auth, "content-type": "application/json" },
+      body: {
+        name: "November notes",
+        subject: "November notes",
+        lists: [1, 3],
+        type: "regular",
+        content_type: "html",
+        body: '<p>Hello &amp; welcome.<br>Read <a href="https://example.com/n">https://example.com/n</a></p>',
+        altbody: "Hello & welcome.\nRead https://example.com/n",
+        messenger: "email",
+        from_email: "News <news@example.com>",
+      },
+    });
+    expect(calls[1]).toEqual({ url: "https://news.example/api/campaigns/12/status", method: "PUT", headers: { authorization: auth, "content-type": "application/json" }, body: { status: "running" } });
+  });
+
+  it("leaves a draft unsent, and uploads images to Listmonk itself", async () => {
+    const { fetcher, calls } = fake(({ url }) => (url.endsWith("/api/media") ? { data: { id: 9, uri: "/uploads/sheet.png" } } : { data: { id: 13 } }));
+    await get("listmonk").publish(post("A picture", [png], { status: "draft", title: "Subject line" }), creds, { fetch: fetcher });
+    expect(calls.map((c) => `${c.method} ${c.url}`)).toEqual(["POST https://news.example/api/media", "POST https://news.example/api/campaigns"]);
+    expect(calls[0].headers).toEqual({ authorization: auth });
+    expect(calls[0].body).toEqual({ file: "file:sheet.png" });
+    const body = calls[1].body as { name: string; subject: string; body: string; altbody: string };
+    expect(body.subject).toBe("Subject line");
+    expect(body.body).toBe('<p>A picture</p>\n<figure><img src="https://news.example/uploads/sheet.png" alt="A printed sheet"></figure>');
+    expect(body.altbody).toBe("A picture");
+  });
+
+  it("says which campaign was left as a draft when Listmonk will not start it, and does not ask to be tried again", async () => {
+    const { fetcher, calls } = fake(({ url }) => (url.endsWith("/status") ? Response.json({ message: "SMTP is not configured" }, { status: 500 }) : { data: { id: 21 } }));
+    const error = await get("listmonk").publish(post("Subject\nBody"), creds, { fetch: fetcher }).catch((e) => e);
+    expect(error).toBeInstanceOf(PublishError);
+    expect(error.message).toBe("Listmonk made campaign 21 as a draft and would not start it. Start it in Listmonk, or delete it there before trying again. Listmonk answered 500: SMTP is not configured");
+    expect(error.retryable).toBe(false);
+    expect(calls).toHaveLength(2);
+    const denied = fake(() => Response.json({ message: "invalid API credentials" }, { status: 403 }));
+    const refused = await get("listmonk").publish(post("Subject\nBody"), creds, { fetch: denied.fetcher }).catch((e) => e);
+    expect(refused.message).toBe("Listmonk answered 403: invalid API credentials");
+    for (const thrown of [error, refused]) expect(leaks(thrown, creds.api_token, "broadside:lm-token-91c4")).toBe(false);
+  });
+
+  it("reads a campaign's views and clicks", async () => {
+    const { fetcher, calls } = fake(() => ({ data: { id: 12, views: 140, clicks: 9, bounces: 1, sent: 300 } }));
+    const result = await get("listmonk").metrics!({ id: "12" }, creds, { fetch: fetcher });
+    expect(result.metrics).toEqual([
+      { kind: "views", label: "Views", value: 140 },
+      { kind: "clicks", label: "Clicks", value: 9 },
+    ]);
+    expect(calls).toEqual([{ url: "https://news.example/api/campaigns/12?no_body=true", method: "GET", headers: { authorization: auth }, body: undefined }]);
   });
 });

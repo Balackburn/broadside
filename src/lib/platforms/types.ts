@@ -332,7 +332,12 @@ function describe(body: unknown): string {
   const nested = o.error && typeof o.error === "object" ? (o.error as Record<string, unknown>) : undefined;
   const text =
     nested?.message ?? o.message ?? o.error_description ?? o.description ?? o.detail ?? o.error ?? o.title;
-  return typeof text === "string" ? text.slice(0, 300) : JSON.stringify(body).slice(0, 300);
+  if (typeof text === "string") return text.slice(0, 300);
+  // Ghost and Tumblr answer with a list of errors, and Tumblr also with a status line under `meta`.
+  const first = Array.isArray(o.errors) && o.errors[0] && typeof o.errors[0] === "object" ? (o.errors[0] as Record<string, unknown>) : undefined;
+  const meta = o.meta && typeof o.meta === "object" ? (o.meta as Record<string, unknown>) : undefined;
+  const listed = first?.message ?? first?.title ?? first?.detail ?? meta?.msg;
+  return typeof listed === "string" ? listed.slice(0, 300) : JSON.stringify(body).slice(0, 300);
 }
 
 export const json = (body: unknown, headers: Record<string, string> = {}): RequestInit => ({
