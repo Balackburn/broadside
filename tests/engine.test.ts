@@ -279,7 +279,8 @@ describe("signing in with TikTok", () => {
       return tiktok(input, init);
     }) as typeof fetch;
     const url = begin();
-    const account = await finishOAuth("tiktok", url.searchParams.get("state")!, "good-code", recording);
+    const { account } = await finishOAuth("tiktok", url.searchParams.get("state")!, "good-code", recording);
+    if (!account) throw new Error("TikTok connects without a choice");
     expect(account).toMatchObject({ platform: "tiktok", handle: "Test Creator" });
     expect(seen[0]).toMatchObject({ client_key: "ck", client_secret: "cs", code: "good-code", redirect_uri: "http://localhost:3000/oauth/tiktok/callback" });
     expect(createHash("sha256").update(seen[0].code_verifier).digest("hex")).toBe(url.searchParams.get("code_challenge"));

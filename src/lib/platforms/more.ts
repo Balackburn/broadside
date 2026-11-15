@@ -2,7 +2,8 @@ import { createHash } from "node:crypto";
 import { schnorr } from "@noble/curves/secp256k1.js";
 import { bech32 } from "@scure/base";
 import { assertPublicUrl } from "../net";
-import { call, images, json, videos, PublishError, type Connector, type Context, type Credentials } from "./types";
+import { tokenFields, withSession } from "./oauth2";
+import { call, images, json, videos, PublishError, type Choice, type Connector, type Context, type Credentials, type OAuthSpec } from "./types";
 
 /** The first line of a post doubles as its title on networks that want one. */
 export function titleAndBody(text: string, options: Record<string, unknown>, max: number): { title: string; body: string } {
@@ -16,19 +17,64 @@ const formBody = (params: Record<string, string>): URLSearchParams => new URLSea
 
 /* Pinterest --------------------------------------------------------------- */
 
+/**
+ * Pinterest's access token lasts 30 days and its refresh token 60. Each
+ * refresh returns a new refresh token good for another 60, so an account that
+ * posts at least that often stays connected. A sign-in ends with a choice of
+ * board, because a pin always goes to one.
+ */
+const pinterestOAuth: OAuthSpec = {
+  authorizeUrl: "https://www.pinterest.com/oauth/",
+  tokenUrl: "https://api.pinterest.com/v5/oauth/token",
+  scopes: ["boards:read", "pins:write", "user_accounts:read"],
+  scopeSeparator: ",",
+  client: { id: "app_id", secret: "app_secret" },
+  pkce: "none",
+  clientAuth: "basic",
+  // Apps made before 25 September 2025 must ask for the refresh token that can itself be renewed. Newer apps get it anyway.
+  exchangeParams: { continuous_refresh: "true" },
+  choose: {
+    prompt: "Pick the board to pin to.",
+    multiple: false,
+    empty: "This Pinterest account has no boards. Create one on Pinterest, then sign in again.",
+    async list(c, ctx) {
+      const boards: { id: string; name: string; privacy?: string }[] = [];
+      let bookmark: string | undefined;
+      for (let page = 0; page < 10; page++) {
+        const batch: { items?: typeof boards; bookmark?: string | null } = await call(ctx, "Pinterest", `https://api.pinterest.com/v5/boards?page_size=100${bookmark ? `&bookmark=${encodeURIComponent(bookmark)}` : ""}`, {
+          headers: { authorization: `Bearer ${c.access_token}` },
+        });
+        boards.push(...(batch.items ?? []));
+        bookmark = batch.bookmark ?? undefined;
+        if (!bookmark) break;
+      }
+      return boards.map((board): Choice => ({ id: board.id, name: board.name, detail: board.privacy && board.privacy !== "PUBLIC" ? "Not public" : undefined, credentials: { ...c, board_id: board.id, board_name: board.name } }));
+    },
+  },
+  paste: {
+    required: ["access_token", "board_id"],
+    help: "Generate an access token for your app with pins:write, boards:read and user_accounts:read. A board's id is listed by GET /v5/boards.",
+  },
+};
+
 export const pinterest: Connector = {
   id: "pinterest",
   name: "Pinterest",
   docsUrl: "https://developers.pinterest.com/apps/",
   setup: [
-    "Create an app at developers.pinterest.com and generate an access token with pins:write, boards:read and user_accounts:read.",
-    "Open the board you want to pin to; its id is listed by GET /v5/boards.",
-    "Paste the token and board id. Apps on trial access create pins only you can see until Pinterest approves the app.",
+    "Create an app at developers.pinterest.com and, on its Configure tab, add the redirect address shown below under Redirect URIs.",
+    "Paste the App id and App secret key, then continue to Pinterest, approve, and pick the board to pin to.",
+    "Pinterest signs you in for 30 days. Broadside renews that when it posts, as long as it posts at least once in 60 days.",
+    "Apps on trial access create pins only you can see until Pinterest approves the app.",
   ],
   fields: [
-    { key: "access_token", label: "Access token", kind: "secret" },
-    { key: "board_id", label: "Board id", kind: "text" },
+    { key: "app_id", label: "App id", kind: "text", optional: true },
+    { key: "app_secret", label: "App secret key", kind: "secret", optional: true },
+    { key: "access_token", label: "Access token", kind: "secret", hidden: true },
+    { key: "board_id", label: "Board id", kind: "text", hidden: true },
+    { key: "refresh_token", label: "Refresh token", kind: "secret", optional: true, hidden: true },
   ],
+  oauth: pinterestOAuth,
   options: [
     { key: "title", label: "Title", kind: "text" },
     { key: "link", label: "Destination link", kind: "text" },
@@ -36,37 +82,46 @@ export const pinterest: Connector = {
   limits: { maxChars: 800, count: "graphemes", maxImages: 1, maxVideos: 0, requiresMedia: true },
 
   async verify(c, ctx) {
-    const me = await call<{ username: string; profile_image?: string }>(ctx, "Pinterest", "https://api.pinterest.com/v5/user_account", {
-      headers: { authorization: `Bearer ${c.access_token}` },
+    return pinterestSession(c, ctx, async (live) => {
+      const me = await call<{ username: string; profile_image?: string }>(ctx, "Pinterest", "https://api.pinterest.com/v5/user_account", {
+        headers: { authorization: `Bearer ${live.access_token}` },
+      });
+      // An account made by signing in names its board, since one person may connect several.
+      return { handle: c.board_name ? `@${me.username}, ${c.board_name}` : `@${me.username}`, avatarUrl: me.profile_image, credentials: { username: me.username } };
     });
-    return { handle: `@${me.username}`, avatarUrl: me.profile_image, credentials: { username: me.username } };
   },
 
   async publish(input, c, ctx) {
-    const image = images(input)[0];
-    const pin = await call<{ id: string }>(
-      ctx,
-      "Pinterest",
-      "https://api.pinterest.com/v5/pins",
-      json(
-        {
-          board_id: c.board_id,
-          title: typeof input.options.title === "string" ? input.options.title.slice(0, 100) : undefined,
-          description: input.text,
-          link: input.options.link || undefined,
-          alt_text: image.alt || undefined,
-          media_source: {
-            source_type: "image_base64",
-            content_type: image.contentType,
-            data: Buffer.from(await image.read()).toString("base64"),
+    return pinterestSession(c, ctx, async (live) => {
+      const image = images(input)[0];
+      const pin = await call<{ id: string }>(
+        ctx,
+        "Pinterest",
+        "https://api.pinterest.com/v5/pins",
+        json(
+          {
+            board_id: c.board_id,
+            title: typeof input.options.title === "string" ? input.options.title.slice(0, 100) : undefined,
+            description: input.text,
+            link: input.options.link || undefined,
+            alt_text: image.alt || undefined,
+            media_source: {
+              source_type: "image_base64",
+              content_type: image.contentType,
+              data: Buffer.from(await image.read()).toString("base64"),
+            },
           },
-        },
-        { authorization: `Bearer ${c.access_token}` },
-      ),
-    );
-    return { id: pin.id, url: `https://www.pinterest.com/pin/${pin.id}` };
+          { authorization: `Bearer ${live.access_token}` },
+        ),
+      );
+      return { id: pin.id, url: `https://www.pinterest.com/pin/${pin.id}` };
+    });
   },
 };
+
+/** A pasted token with nothing to renew it is used as it is; a signed-in account is renewed when its 30 days are nearly up. */
+const pinterestSession = <T extends object>(c: Credentials, ctx: Context, work: (live: Credentials) => Promise<T>): Promise<T> =>
+  c.refresh_token ? withSession("Pinterest", pinterestOAuth, c, ctx, work) : work(c);
 
 /* Reddit ------------------------------------------------------------------ */
 
@@ -397,6 +452,17 @@ export const tiktok: Connector = {
     authorizeUrl: "https://www.tiktok.com/v2/auth/authorize/",
     tokenUrl: "https://open.tiktokapis.com/v2/oauth/token/",
     scopes: ["user.info.basic", "video.upload", "video.publish"],
+    scopeSeparator: ",",
+    client: { id: "client_key", secret: "client_secret", param: "client_key" },
+    // TikTok wants the challenge as the hex SHA-256 of the verifier, not the usual base64url.
+    pkce: "S256-hex",
+    clientAuth: "body",
+    // Only the refresh token is kept: TikTok's access token lasts a day, and every post starts by trading the refresh token for a new one.
+    async exchange(tokens, app) {
+      if (!tokens.refresh_token) throw new PublishError("TikTok returned no refresh token, so the account could not stay connected.");
+      return { ...app, refresh_token: tokens.refresh_token };
+    },
+    paste: { required: ["client_key", "client_secret", "refresh_token"] },
   },
   options: [
     { key: "publish_mode", label: "Publish as", kind: "select", choices: ["draft", "direct"], help: "Draft sends it to your TikTok inbox to finish in the app." },
@@ -467,20 +533,49 @@ export const tiktok: Connector = {
 
 /* YouTube ----------------------------------------------------------------- */
 
+/**
+ * Google's access token lasts an hour and its refresh token does not rotate.
+ * access_type=offline is what makes Google issue the refresh token, and
+ * prompt=consent makes it issue one again for an account that approved the
+ * app before. An app whose consent screen is still in Testing gets a refresh
+ * token that stops after seven days.
+ */
+const youtubeOAuth: OAuthSpec = {
+  authorizeUrl: "https://accounts.google.com/o/oauth2/v2/auth",
+  tokenUrl: "https://oauth2.googleapis.com/token",
+  // youtube.upload sends the video; youtube.readonly reads the channel's name for the account list.
+  scopes: ["https://www.googleapis.com/auth/youtube.upload", "https://www.googleapis.com/auth/youtube.readonly"],
+  authorize: { access_type: "offline", prompt: "consent" },
+  client: { id: "client_id", secret: "client_secret" },
+  pkce: "none",
+  clientAuth: "body",
+  async exchange(tokens, app) {
+    if (!tokens.refresh_token) throw new PublishError("Google returned no refresh token, so the channel could not stay connected. Remove Broadside's access at myaccount.google.com/permissions and sign in again.");
+    return { ...app, ...tokenFields(tokens) };
+  },
+  paste: {
+    required: ["client_id", "client_secret", "refresh_token"],
+    help: "Authorise your channel for the scope youtube.upload with offline access (the OAuth Playground works) and keep the refresh token.",
+  },
+};
+
 export const youtube: Connector = {
   id: "youtube",
   name: "YouTube",
-  docsUrl: "https://developers.google.com/youtube/v3/guides/uploading_a_video",
+  docsUrl: "https://console.cloud.google.com/apis/credentials",
   setup: [
-    "In Google Cloud create a project, enable YouTube Data API v3 and create an OAuth client.",
-    "Authorise your channel for the scope youtube.upload with offline access (the OAuth Playground works) and keep the refresh token.",
-    "Paste the client id, client secret and refresh token. The first line of each post becomes the video title.",
+    "In Google Cloud create a project, enable YouTube Data API v3 and create an OAuth client of type Web application.",
+    "Add the redirect address shown below under Authorized redirect URIs.",
+    "Paste the client id and client secret, then continue to Google and approve. Broadside connects the channel of the Google account you sign in with.",
+    "While the app's consent screen is in Testing, Google ends the sign-in after 7 days. Publish the app to production to stay connected.",
+    "The first line of each post becomes the video title.",
   ],
   fields: [
     { key: "client_id", label: "Client id", kind: "text" },
     { key: "client_secret", label: "Client secret", kind: "secret" },
-    { key: "refresh_token", label: "Refresh token", kind: "secret" },
+    { key: "refresh_token", label: "Refresh token", kind: "secret", hidden: true },
   ],
+  oauth: youtubeOAuth,
   options: [
     { key: "title", label: "Title", kind: "text" },
     { key: "privacy", label: "Visibility", kind: "select", choices: ["private", "unlisted", "public"] },
@@ -488,58 +583,51 @@ export const youtube: Connector = {
   limits: { maxChars: 5000, count: "graphemes", maxImages: 0, maxVideos: 1, requiresMedia: true },
 
   async verify(c, ctx) {
-    const token = await youtubeToken(c, ctx);
-    const mine = await call<{ items?: { snippet: { title: string; thumbnails?: { default?: { url: string } } } }[] }>(
-      ctx,
-      "YouTube",
-      "https://www.googleapis.com/youtube/v3/channels?part=snippet&mine=true",
-      { headers: { authorization: `Bearer ${token}` } },
-    ).catch(() => ({ items: undefined }));
-    const channel = mine.items?.[0]?.snippet;
-    return { handle: channel?.title ?? "YouTube channel", avatarUrl: channel?.thumbnails?.default?.url };
+    return withSession("YouTube", youtubeOAuth, c, ctx, async (live) => {
+      const mine = await call<{ items?: { snippet: { title: string; thumbnails?: { default?: { url: string } } } }[] }>(
+        ctx,
+        "YouTube",
+        "https://www.googleapis.com/youtube/v3/channels?part=snippet&mine=true",
+        { headers: { authorization: `Bearer ${live.access_token}` } },
+      ).catch(() => ({ items: undefined }));
+      const channel = mine.items?.[0]?.snippet;
+      return { handle: channel?.title ?? "YouTube channel", avatarUrl: channel?.thumbnails?.default?.url };
+    });
   },
 
   async publish(input, c, ctx) {
-    const token = await youtubeToken(c, ctx);
-    const video = videos(input)[0];
-    const bytes = await video.read();
-    const { title, body } = titleAndBody(input.text, input.options, 100);
-    let session: Response;
-    try {
-      session = await ctx.fetch("https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status", {
-        method: "POST",
-        headers: {
-          authorization: `Bearer ${token}`,
-          "content-type": "application/json",
-          "x-upload-content-type": video.contentType,
-          "x-upload-content-length": String(bytes.length),
-        },
-        body: JSON.stringify({
-          snippet: { title, description: body, categoryId: "22" },
-          status: { privacyStatus: input.options.privacy ?? "private", selfDeclaredMadeForKids: false },
-        }),
+    return withSession("YouTube", youtubeOAuth, c, ctx, async (live) => {
+      const video = videos(input)[0];
+      const bytes = await video.read();
+      const { title, body } = titleAndBody(input.text, input.options, 100);
+      let session: Response;
+      try {
+        session = await ctx.fetch("https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status", {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${live.access_token}`,
+            "content-type": "application/json",
+            "x-upload-content-type": video.contentType,
+            "x-upload-content-length": String(bytes.length),
+          },
+          body: JSON.stringify({
+            snippet: { title, description: body, categoryId: "22" },
+            status: { privacyStatus: input.options.privacy ?? "private", selfDeclaredMadeForKids: false },
+          }),
+        });
+      } catch (cause) {
+        throw new PublishError(`YouTube could not be reached: ${(cause as Error).message}`, true);
+      }
+      const location = session.headers.get("location");
+      if (!session.ok || !location) {
+        throw new PublishError(`YouTube answered ${session.status}: ${(await session.text()).slice(0, 300)}`, session.status >= 500);
+      }
+      const uploaded = await call<{ id: string }>(ctx, "YouTube", location, {
+        method: "PUT",
+        headers: { "content-type": video.contentType },
+        body: bytes as BodyInit,
       });
-    } catch (cause) {
-      throw new PublishError(`YouTube could not be reached: ${(cause as Error).message}`, true);
-    }
-    const location = session.headers.get("location");
-    if (!session.ok || !location) {
-      throw new PublishError(`YouTube answered ${session.status}: ${(await session.text()).slice(0, 300)}`, session.status >= 500);
-    }
-    const uploaded = await call<{ id: string }>(ctx, "YouTube", location, {
-      method: "PUT",
-      headers: { "content-type": video.contentType },
-      body: bytes as BodyInit,
+      return { id: uploaded.id, url: `https://www.youtube.com/watch?v=${uploaded.id}` };
     });
-    return { id: uploaded.id, url: `https://www.youtube.com/watch?v=${uploaded.id}` };
   },
 };
-
-async function youtubeToken(c: Credentials, ctx: Context): Promise<string> {
-  const granted = await call<{ access_token?: string }>(ctx, "YouTube", "https://oauth2.googleapis.com/token", {
-    method: "POST",
-    body: formBody({ client_id: c.client_id, client_secret: c.client_secret, refresh_token: c.refresh_token, grant_type: "refresh_token" }),
-  });
-  if (!granted.access_token) throw new PublishError("Google did not return an access token; check the client and refresh token.");
-  return granted.access_token;
-}

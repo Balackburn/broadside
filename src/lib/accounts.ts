@@ -2,7 +2,7 @@ import { newId, open, seal } from "./crypto";
 import { all, get, now, run } from "./db";
 import { guardedFetch } from "./net";
 import { connector } from "./platforms";
-import { PublishError, type Credentials } from "./platforms/types";
+import { PublishError, type Connector, type Credentials } from "./platforms/types";
 
 export type Account = {
   id: string;
@@ -66,6 +66,11 @@ export async function connectAccount(platform: string, input: Credentials, fetch
     if (!value && !field.optional) throw new InputError(`${field.label} is required to connect ${c.name}.`);
     if (value) credentials[field.key] = value;
   }
+  return saveVerified(c, credentials, fetcher);
+}
+
+/** Asks the network who these credentials belong to, and stores the account only if it answers. A sign-in ends here too. */
+export async function saveVerified(c: Connector, credentials: Credentials, fetcher: typeof fetch = fetch): Promise<Account> {
   let profile;
   try {
     profile = await c.verify(credentials, { fetch: guardedFetch(fetcher) });
@@ -77,7 +82,7 @@ export async function connectAccount(platform: string, input: Credentials, fetch
   run(
     "INSERT INTO accounts (id, platform, label, handle, avatar_url, credentials, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
     id,
-    platform,
+    c.id,
     c.name,
     profile.handle,
     profile.avatarUrl ?? null,

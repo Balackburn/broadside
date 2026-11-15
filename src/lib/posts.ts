@@ -344,11 +344,13 @@ export async function publishTarget(targetId: string, fetcher: typeof fetch = fe
     markAccount(target.account_id, null);
   } catch (error) {
     const known = error instanceof PublishError;
+    // A network that rotated its tokens before the failure has already retired the old ones, so the new ones are kept whatever happened next.
+    if (known && error.credentials) saveCredentials(target.account_id, error.credentials);
     const reason = known ? error.message : `${c.name} failed unexpectedly: ${(error as Error).message}`;
     // In a thread the error says which part stopped, so it is clear what is already out.
     const message = texts.length > 1 ? `Part ${sent.length + 1} of ${texts.length}: ${reason}` : reason;
     fail(message, known && error.retryable);
-    if (known && /\b40[13]\b/.test(reason)) markAccount(target.account_id, reason);
+    if (known && (error.reconnect || /\b40[13]\b/.test(reason))) markAccount(target.account_id, reason);
   }
   run("UPDATE posts SET updated_at = ? WHERE id = ?", now(), target.post_id);
 }

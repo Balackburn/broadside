@@ -128,7 +128,8 @@ export function buildServer({ baseUrl, local }: Options): McpServer {
       const c = connector(platform);
       if (!c) throw new InputError(`Broadside has no network called "${platform}". Call list_platforms for the ids.`);
       if (platform === "sandbox") return { connected: await connectAccount("sandbox", { name: name ?? "Rehearsal" }) };
-      return { connect_url: `${baseUrl}/app/accounts?connect=${platform}`, steps: c.setup, needs: c.fields.map((f) => f.label) };
+      // Where the network signs in, the form asks only for the app's id and secret; the tokens come from the network.
+      return { connect_url: `${baseUrl}/app/accounts?connect=${platform}`, steps: c.setup, needs: c.fields.filter((f) => !f.hidden).map((f) => f.label), signs_in: Boolean(c.oauth) };
     }),
   );
 

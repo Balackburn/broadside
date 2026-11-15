@@ -1,4 +1,4 @@
-import { blob, call, images, videos, PublishError, type Connector, type Context, type MediaItem } from "./types";
+import { blob, call, images, videos, PublishError, type Choice, type Connector, type Context, type MediaItem, type OAuthSpec, type TokenResponse } from "./types";
 
 const form = (params: Record<string, string | undefined>): RequestInit => {
   const body = new URLSearchParams();
@@ -33,17 +33,52 @@ async function ready(ctx: Context, network: string, url: string, field: string):
 
 const TH = "https://graph.threads.net/v1.0";
 
+/**
+ * The code is exchanged for a token that lasts about an hour, and that one is
+ * traded at once for a long-lived token (60 days), which is the only thing
+ * stored. Publishing refreshes it, so the app's secret is not kept.
+ *
+ * Meta documents the long-lived exchange as a GET with the secret in the
+ * query string. It is sent as a POST with the same parameters in the body,
+ * which the endpoint reads the same way, so the secret stays out of the address.
+ */
+const threadsOAuth: OAuthSpec = {
+  authorizeUrl: "https://threads.com/oauth/authorize",
+  tokenUrl: "https://graph.threads.com/oauth/access_token",
+  // threads_manage_replies is what lets a thread's later parts go out as replies.
+  scopes: ["threads_basic", "threads_content_publish", "threads_manage_replies"],
+  scopeSeparator: ",",
+  client: { id: "app_id", secret: "app_secret" },
+  pkce: "none",
+  clientAuth: "body",
+  httpsOnly: true,
+  async exchange(tokens, app, ctx) {
+    const long = await call<TokenResponse>(ctx, "Threads", "https://graph.threads.com/access_token", form({ grant_type: "th_exchange_token", client_secret: app.app_secret, access_token: tokens.access_token }));
+    if (!long.access_token) throw new PublishError("Threads did not return a long-lived token.");
+    return { access_token: long.access_token };
+  },
+  paste: {
+    required: ["access_token"],
+    help: "In the Threads use case's settings, open the User token generator and generate a token for your account. To post threads it also needs threads_manage_replies.",
+  },
+};
+
 export const threads: Connector = {
   id: "threads",
   name: "Threads",
   docsUrl: "https://developers.facebook.com/docs/threads/get-started",
   setup: [
-    "Create a Meta app with the Threads use case and add your account as a Threads tester.",
-    "In the use case's settings open the User token generator and generate a token for your account.",
-    "Paste that long-lived token here. It lasts 60 days; Broadside refreshes it each time it posts.",
-    "To post threads, the token also needs the threads_manage_replies permission.",
+    "Create a Meta app with the Threads use case, with the permissions threads_basic, threads_content_publish and threads_manage_replies, and add your account as a Threads tester.",
+    "In the use case's settings, add the redirect address shown below under valid OAuth redirect URIs. Threads accepts only https addresses there, so signing in needs Broadside on an https address (set BROADSIDE_PUBLIC_URL).",
+    "Paste the Threads app ID and Threads app secret from the same page, then continue to Threads and approve.",
+    "On http://localhost, paste a token from the User token generator. Either way the token lasts 60 days and Broadside refreshes it each time it posts.",
   ],
-  fields: [{ key: "access_token", label: "Access token", kind: "secret" }],
+  fields: [
+    { key: "app_id", label: "Threads app ID", kind: "text", optional: true },
+    { key: "app_secret", label: "Threads app secret", kind: "secret", optional: true },
+    { key: "access_token", label: "Access token", kind: "secret", hidden: true },
+  ],
+  oauth: threadsOAuth,
   limits: { maxChars: 500, count: "graphemes", maxImages: 10, maxVideos: 1, requiresMedia: false, pullsMedia: true },
 
   async verify(c, ctx) {
@@ -122,21 +157,89 @@ export const threads: Connector = {
 /* Facebook Page ----------------------------------------------------------- */
 
 const FB = "https://graph.facebook.com";
+/** The Graph API version the sign-in addresses name, as Meta's Facebook Login guide writes them. */
+const GRAPH = "v27.0";
+
+/** One Facebook Page the signed-in person manages, with the token that posts as it. */
+type Page = { id: string; name: string; access_token?: string };
+
+/**
+ * Facebook Login, shared by Pages and Instagram. The code buys a user token
+ * that lasts an hour or two; trading it for a long-lived one first is what
+ * makes the Page tokens read with it never expire. Only a Page token is
+ * stored with an account. The user token and the app's secret are not.
+ *
+ * Meta's guide writes both exchanges as GETs with the secret in the query
+ * string. They are sent as POSTs with the same parameters in the body, which
+ * the endpoint reads the same way, so the secret stays out of the address.
+ */
+const facebookLogin = (scopes: string[]): Pick<OAuthSpec, "authorizeUrl" | "tokenUrl" | "scopes" | "scopeSeparator" | "client" | "pkce" | "clientAuth" | "loopback" | "exchange"> => ({
+  authorizeUrl: `https://www.facebook.com/${GRAPH}/dialog/oauth`,
+  tokenUrl: `${FB}/${GRAPH}/oauth/access_token`,
+  scopes,
+  scopeSeparator: ",",
+  client: { id: "app_id", secret: "app_secret" },
+  pkce: "none",
+  clientAuth: "body",
+  // An app in development mode may redirect to http://localhost, and to nothing else that is not https.
+  loopback: "localhost",
+  async exchange(tokens, app, ctx) {
+    const long = await call<TokenResponse>(
+      ctx,
+      "Facebook",
+      `${FB}/${GRAPH}/oauth/access_token`,
+      form({ grant_type: "fb_exchange_token", client_id: app.app_id, client_secret: app.app_secret, fb_exchange_token: tokens.access_token }),
+    );
+    if (!long.access_token) throw new PublishError("Facebook did not return a long-lived token.");
+    return { user_token: long.access_token };
+  },
+});
+
+/** Every Page the signed-in person can act for, following Facebook's paging to the end. */
+async function pages(userToken: string, ctx: Context): Promise<Page[]> {
+  const found: Page[] = [];
+  let url: string | undefined = `${FB}/${GRAPH}/me/accounts?fields=id,name,access_token&limit=100&access_token=${encodeURIComponent(userToken)}`;
+  for (let page = 0; url && page < 10; page++) {
+    const batch: { data?: Page[]; paging?: { next?: string } } = await call(ctx, "Facebook", url);
+    found.push(...(batch.data ?? []));
+    // The next page is followed only while it stays on Facebook's own host, since the address comes from the response.
+    url = batch.paging?.next?.startsWith(`${FB}/`) ? batch.paging.next : undefined;
+  }
+  return found.filter((page) => page.access_token);
+}
 
 export const facebook: Connector = {
   id: "facebook",
   name: "Facebook Page",
   docsUrl: "https://developers.facebook.com/docs/pages-api/posts",
   setup: [
-    "Create a Meta app, then in the Graph API Explorer request pages_manage_posts and pages_read_engagement.",
-    "Exchange for a long-lived user token and call /me/accounts to read your Page's id and Page access token.",
-    "Paste the Page id and its Page access token here. A Page token made from a long-lived user token does not expire.",
-    "To post threads, which go out as comments under the post, also request pages_manage_engagement.",
+    "Create a Meta app with Facebook Login, and keep it in development mode unless Meta has reviewed it. In development mode it works for people with a role on the app.",
+    "In Facebook Login settings add the redirect address shown below under Valid OAuth Redirect URIs. An address on http://localhost needs no entry while the app is in development mode.",
+    "Paste the App ID and App secret from App settings, Basic, then continue to Facebook, approve, and pick the Pages to connect.",
+    "A Page stays connected: the Page token Broadside keeps does not expire.",
   ],
   fields: [
-    { key: "page_id", label: "Page id", kind: "text" },
-    { key: "access_token", label: "Page access token", kind: "secret" },
+    { key: "app_id", label: "App ID", kind: "text", optional: true },
+    { key: "app_secret", label: "App secret", kind: "secret", optional: true },
+    { key: "page_id", label: "Page id", kind: "text", hidden: true },
+    { key: "access_token", label: "Page access token", kind: "secret", hidden: true },
   ],
+  oauth: {
+    // pages_manage_engagement is what lets a thread's later parts go out as comments.
+    ...facebookLogin(["pages_show_list", "pages_manage_posts", "pages_read_engagement", "pages_manage_engagement"]),
+    choose: {
+      prompt: "Pick the Pages to connect. Each becomes its own account.",
+      multiple: true,
+      empty: "Facebook listed no Pages for this sign-in. Approve at least one Page on Facebook's screen, and check that you manage it.",
+      async list(c, ctx) {
+        return (await pages(c.user_token, ctx)).map((page): Choice => ({ id: page.id, name: page.name, credentials: { page_id: page.id, access_token: page.access_token! } }));
+      },
+    },
+    paste: {
+      required: ["page_id", "access_token"],
+      help: "In the Graph API Explorer request pages_manage_posts, pages_read_engagement and pages_manage_engagement, exchange for a long-lived user token, and read the Page's id and Page access token from /me/accounts.",
+    },
+  },
   limits: { maxChars: 63206, count: "graphemes", maxImages: 10, maxVideos: 0, requiresMedia: false, maxReplyChars: 8000 },
 
   async verify(c, ctx) {
@@ -184,15 +287,44 @@ export const instagram: Connector = {
   name: "Instagram",
   docsUrl: "https://developers.facebook.com/docs/instagram-platform/content-publishing",
   setup: [
-    "Switch the account to Professional (Business or Creator) and link it to a Facebook Page.",
-    "With a Meta app, request instagram_basic and instagram_content_publish for a user that manages that Page.",
-    "Paste the Instagram account id (from /{page-id}?fields=instagram_business_account) and the access token.",
-    "To post threads, which go out as comments under the post, also request instagram_manage_comments.",
+    "Switch the Instagram account to Professional (Business or Creator) and link it to a Facebook Page you manage.",
+    "Create a Meta app with Facebook Login and the Instagram permissions, and keep it in development mode unless Meta has reviewed it.",
+    "In Facebook Login settings add the redirect address shown below under Valid OAuth Redirect URIs. An address on http://localhost needs no entry while the app is in development mode.",
+    "Paste the App ID and App secret from App settings, Basic, then continue to Facebook, approve, and pick the Instagram accounts to connect.",
   ],
   fields: [
-    { key: "ig_user_id", label: "Instagram account id", kind: "text" },
-    { key: "access_token", label: "Access token", kind: "secret" },
+    { key: "app_id", label: "App ID", kind: "text", optional: true },
+    { key: "app_secret", label: "App secret", kind: "secret", optional: true },
+    { key: "ig_user_id", label: "Instagram account id", kind: "text", hidden: true },
+    { key: "access_token", label: "Access token", kind: "secret", hidden: true },
   ],
+  oauth: {
+    // instagram_manage_comments is what lets a thread's later parts go out as comments. The Page permissions are how Facebook finds the account.
+    ...facebookLogin(["instagram_basic", "instagram_content_publish", "instagram_manage_comments", "pages_show_list", "pages_read_engagement"]),
+    choose: {
+      prompt: "Pick the Instagram accounts to connect. Each becomes its own account.",
+      multiple: true,
+      empty: "Facebook listed no Instagram professional account for this sign-in. Link the Instagram account to a Facebook Page you manage, and approve that Page on Facebook's screen.",
+      async list(c, ctx) {
+        const choices: Choice[] = [];
+        for (const page of await pages(c.user_token, ctx)) {
+          const linked = await call<{ instagram_business_account?: { id: string; username?: string } }>(
+            ctx,
+            "Instagram",
+            `${FB}/${GRAPH}/${page.id}?fields=instagram_business_account{id,username}&access_token=${encodeURIComponent(page.access_token!)}`,
+          );
+          const account = linked.instagram_business_account;
+          // Publishing uses the token of the Page the account is linked to.
+          if (account) choices.push({ id: account.id, name: account.username ? `@${account.username}` : `Instagram account ${account.id}`, detail: `Linked to the Page ${page.name}`, credentials: { ig_user_id: account.id, access_token: page.access_token! } });
+        }
+        return choices;
+      },
+    },
+    paste: {
+      required: ["ig_user_id", "access_token"],
+      help: "Request instagram_basic, instagram_content_publish and instagram_manage_comments for someone who manages the linked Page. The account id is in /{page-id}?fields=instagram_business_account.",
+    },
+  },
   limits: { maxChars: 2200, count: "graphemes", maxImages: 10, maxVideos: 1, requiresMedia: true, pullsMedia: true },
 
   async verify(c, ctx) {

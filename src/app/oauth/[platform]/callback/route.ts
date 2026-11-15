@@ -14,11 +14,14 @@ export async function GET(request: Request, { params }: RouteContext<"/oauth/[pl
   if (!hostAllowed(request)) return new Response(HOST_REFUSED, { status: 403 });
   const { platform } = await params;
   const query = new URL(request.url).searchParams;
-  const back = new URL("/app/accounts", baseUrl(request));
+  let back = new URL("/app/accounts", baseUrl(request));
   try {
     if (query.get("error")) throw new InputError(`The network refused the sign-in: ${query.get("error_description") ?? query.get("error")}.`);
-    const account = await finishOAuth(platform, query.get("state") ?? "", query.get("code") ?? "");
-    back.searchParams.set("connected", account.handle);
+    const done = await finishOAuth(platform, query.get("state") ?? "", query.get("code") ?? "");
+    // Back to where the sign-in was started, which can be another name for this machine than the one the network redirected to.
+    back = new URL("/app/accounts", done.base);
+    if (done.choice) back.searchParams.set("choose", done.choice);
+    else if (done.account) back.searchParams.set("connected", done.account.handle);
   } catch (error) {
     if (!(error instanceof InputError)) console.error("[broadside] sign-in callback failed:", error);
     back.searchParams.set("error", error instanceof InputError ? error.message : "The sign-in could not be completed. The server log has the details.");

@@ -18,8 +18,69 @@ export type CredentialField = {
   hidden?: boolean;
 };
 
-/** A network that connects by sending you to its own approval page. */
-export type OAuthSpec = { authorizeUrl: string; tokenUrl: string; scopes: string[] };
+/** What a token endpoint answers. Networks add fields of their own; these are the ones Broadside reads. */
+export type TokenResponse = {
+  access_token?: string;
+  refresh_token?: string;
+  /** Seconds until the access token stops working. */
+  expires_in?: number;
+  [key: string]: unknown;
+};
+
+/** One thing the signed-in person can post to, when a sign-in ends in a choice (a Page, an Instagram account, a board). */
+export type Choice = {
+  id: string;
+  name: string;
+  detail?: string;
+  /** Everything the account made from this choice stores. It stays on the server; the browser sees the id, name and detail. */
+  credentials: Credentials;
+};
+
+/**
+ * A network that connects by sending you to its own approval page, described
+ * well enough that one flow serves them all. You always bring your own
+ * developer app: its id and secret are two of the connector's fields.
+ */
+export type OAuthSpec = {
+  authorizeUrl: string;
+  tokenUrl: string;
+  /** What Broadside asks permission for: enough to post, and to reply or comment where the network takes threads. */
+  scopes: string[];
+  /** How the scopes are joined in the authorize address. A space unless the network says otherwise. */
+  scopeSeparator?: " " | ",";
+  /** Scopes this one connection also needs, decided by what was typed into the form. */
+  extraScopes?: (app: Credentials) => string[];
+  /** Fixed parameters the network wants in the authorize address. */
+  authorize?: Record<string, string>;
+  /** Fixed parameters the network wants when the code is exchanged. */
+  exchangeParams?: Record<string, string>;
+  /** Which fields hold the app's id and secret, and what the network calls the id in its requests (client_id unless named). */
+  client: { id: string; secret: string; param?: string; secretOptional?: boolean };
+  /** S256 is RFC 7636. S256-hex is TikTok's variant, which sends the challenge as a hex digest. */
+  pkce: "S256" | "S256-hex" | "none";
+  /** Where the app's id and secret travel in token requests: the form body, or an HTTP Basic header. Never the address. */
+  clientAuth: "body" | "basic";
+  /** The one name the network accepts for a redirect to this machine. Without it, the name you browse by is used. */
+  loopback?: "localhost" | "127.0.0.1";
+  /** The network refuses a redirect address that is not https, so signing in needs BROADSIDE_PUBLIC_URL on https. */
+  httpsOnly?: boolean;
+  /**
+   * Turns the answer to the code exchange into the credentials to store, making
+   * any follow-up call the network needs (a short-lived token traded for a
+   * long-lived one). Without it, the app's fields and the tokens are stored.
+   */
+  exchange?: (tokens: TokenResponse, app: Credentials, ctx: Context) => Promise<Credentials>;
+  /** Present when signing in is followed by a choice. Each choice picked becomes its own account. */
+  choose?: {
+    prompt: string;
+    multiple: boolean;
+    /** What to say when the signed-in person has nothing to choose from. */
+    empty: string;
+    list: (credentials: Credentials, ctx: Context) => Promise<Choice[]>;
+  };
+  /** The fields POST /api/v1/accounts takes to connect this network with tokens made by hand, skipping the sign-in. */
+  paste: { required: string[]; optional?: string[]; /** Where those tokens come from, in a sentence. */ help?: string };
+};
 
 export type MediaItem = {
   id: string;
@@ -116,6 +177,10 @@ export type Connector = {
 
 /** An error whose message is safe and useful to show next to a target. */
 export class PublishError extends Error {
+  /** Tokens the network rotated before the failure. They must still be saved: the ones they replaced no longer work. */
+  credentials?: Credentials;
+  /** True when only signing in again will fix it, so the account is marked as needing attention. */
+  reconnect = false;
   constructor(
     message: string,
     readonly retryable = false,
