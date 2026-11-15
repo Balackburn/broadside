@@ -6,7 +6,7 @@ A broadside is a single printed sheet posted in public, and a ship firing every 
 
 ## What it does
 
-Broadside posts to 18 destinations at once: X, Bluesky, Threads, Mastodon, LinkedIn, Instagram, Facebook Pages, TikTok, YouTube, Pinterest, Reddit, Telegram, Discord, Slack, Nostr, Lemmy, DEV and any webhook (Zapier, n8n, Make or your own server). A sandbox destination lets you rehearse without posting anywhere.
+Broadside posts to 18 destinations at once: X, Bluesky, Threads, Mastodon, LinkedIn, Instagram, Facebook Pages, TikTok, YouTube, Pinterest, Reddit, Telegram, Discord, Slack, Nostr, Lemmy, DEV and any webhook destination (Zapier, n8n, Make or your own server). A sandbox destination lets you rehearse without posting anywhere.
 
 It checks every account against that network's rules before it sends anything. If one copy is too long or carries media the network rejects, the post is held and you are told which network and by how much. Give that account its own version and send again.
 
@@ -24,6 +24,8 @@ Four things keep a busy install in order:
 - **Signatures.** A signature is saved text for the end of a post: a sign-off or a set of hashtags. **Add signature** in the composer puts it into the post text, where you can edit it and it counts toward every network's limit. An account can have a default signature. The composer offers it for that account and adds it only when you ask.
 
 It reads back the numbers. For each published post Broadside asks the network for the counts it holds: views or impressions, likes, comments, shares, saves and clicks, whichever that network reports. **Analytics** shows totals for the last 7, 30 or 90 days, a breakdown by network and a row for each copy of a post, and an expanded post in **Posts** shows its numbers with a **Refresh numbers** action. Every figure is a reading stored with the time it was taken, shown as "as of". Nothing is estimated: a count a network does not report is absent, and a network with no numbers to read is named with the reason. See [Analytics](#analytics).
+
+It can work without being asked each time. **Automations** holds two things: RSS and Atom feeds whose new items become posts, saved as drafts unless you choose otherwise, and outgoing webhooks, which tell your other tools when a post is published, fails or is scheduled. See [Automations](#automations).
 
 It is also an MCP server. Claude, Cursor, Codex and other MCP clients can list accounts, check a post, publish, schedule and confirm delivery. You type credentials into Broadside, so they stay out of the chat.
 
@@ -67,9 +69,11 @@ Any Streamable HTTP client works with the same URL and header. A local stdio ser
 { "mcpServers": { "broadside": { "command": "npx", "args": ["tsx", "/path/to/broadside/bin/broadside-mcp.ts"] } } }
 ```
 
-Tools: `list_platforms`, `list_accounts`, `list_groups`, `connect_account`, `disconnect_account`, `upload_media`, `list_media`, `list_tags`, `list_signatures`, `check_post`, `create_post`, `get_post`, `list_posts`, `update_post`, `publish_post`, `cancel_post`, `stop_series`, `retry_target`, `delete_post`, `get_analytics`, `get_post_analytics`.
+Tools: `list_platforms`, `list_accounts`, `list_groups`, `connect_account`, `disconnect_account`, `upload_media`, `list_media`, `list_tags`, `list_signatures`, `check_post`, `create_post`, `get_post`, `list_posts`, `update_post`, `publish_post`, `cancel_post`, `stop_series`, `retry_target`, `delete_post`, `get_analytics`, `get_post_analytics`, `list_feeds`, `list_outgoing_webhooks`.
 
 `get_analytics` (a period of 7, 30 or 90 days, and optionally an account or a tag) and `get_post_analytics` are read-only. They report the readings Broadside has stored and ask no network.
+
+`list_feeds` and `list_outgoing_webhooks` are read-only, and there is no tool that adds, changes, checks or deletes a feed or an outgoing webhook: either could send your posts somewhere or publish words you did not write, so they are set up by a person in the app. An agent sees the site an outgoing webhook calls, never its full address or its secret. `list_posts` takes `origin` and `feed_id` to find the posts a feed made. An agent can edit a draft made from a feed and cannot publish it.
 
 `create_post` and `update_post` take `tags`, and `group_id` in place of `targets` to post to a saved group. `check_post` takes `group_id` too, and `list_posts` filters by `tag`. A signature is text: an agent that wants one reads it from `list_signatures` and puts it at the end of the post itself.
 
@@ -98,10 +102,14 @@ Add `"tags": ["launch", "weekly"]` to tag a post; a tag that does not exist yet 
 | `GET, POST /groups` · `GET, PATCH, DELETE /groups/{id}` | Account groups. `POST` and `PATCH` take `{"name", "account_ids"}` |
 | `GET, POST /signatures` · `PATCH, DELETE /signatures/{id}` | Saved signatures. `POST` and `PATCH` take `{"name", "content", "default_for"}`, where `default_for` lists the accounts that offer it by default |
 | `POST /check` | Dry run against each account's rules |
-| `GET, POST /posts` · `GET, PATCH, DELETE /posts/{id}` | Create (send an `Idempotency-Key` header), read, edit |
+| `GET, POST /posts` · `GET, PATCH, DELETE /posts/{id}` | Create (send an `Idempotency-Key` header), read, edit. `GET /posts` also takes `origin` (`ui`, `api`, `mcp` or `feed`) and `feed_id` |
 | `POST /posts/{id}/publish` · `/cancel` · `/targets/{targetId}/retry` | Act on a post. `/cancel` with `{"series": true}` stops a whole repeating series |
 | `GET /analytics` | Totals, a per-network breakdown and one row per published copy of a post. Takes `period` (7, 30 or 90 days, by publish time; default 30), and optionally `account_id` and `tag`. Reads stored readings only |
 | `GET /posts/{id}/analytics` · `POST /posts/{id}/analytics/refresh` | One post's numbers per published target, each with `as_of`. `refresh` asks the networks now and says how each reading went |
+| `GET, POST /feeds` · `GET, PATCH, DELETE /feeds/{id}` | Feeds. `POST` takes `{"url", "account_ids"` or `"group_id", "template", "action"}`; `action` is `draft` (the default) or `publish`. `PATCH` takes the same except `url`, and `{"paused": true}` or `false` to pause and resume. Each feed comes back with `last_checked_at`, `last_error`, `next_check_at` and the `posts` it created |
+| `POST /feeds/{id}/check` · `/test` | `check` reads the feed now and makes posts from what is new. `test` is a dry run: the post the newest item would make and whether it fits, with nothing saved or sent |
+| `GET, POST /outgoing-webhooks` · `GET, PATCH, DELETE /outgoing-webhooks/{id}` | Outgoing webhooks. `POST` takes `{"name", "url", "events"}` and answers with the signing `secret`, this once. `PATCH` takes the same fields and `{"paused": true}` or `false`. Each comes back with its latest `deliveries` |
+| `POST /outgoing-webhooks/{id}/test` | Sends a signed test delivery now and returns how the receiver answered |
 | `GET, POST /keys` · `DELETE /keys/{id}` | API keys |
 
 Responses are `{ "data": … }` or `{ "error": { "code", "message", "details" } }`.
@@ -176,6 +184,58 @@ Not available, and shown as such instead of zeros:
 
 **Accounts connected before analytics.** Threads, Instagram, Facebook Pages, TikTok and Pinterest now ask for one more permission when you sign in (the ones in the table). Accounts you connected earlier do not have it. They keep posting as before; their numbers show the network's refusal with a note to reconnect, and Facebook Pages still show reactions, comments and shares. Reconnect an account to grant the permission. A TikTok app must have `video.list` added to it first, or list its scopes without it in the Scopes field and go without TikTok numbers.
 
+## Automations
+
+Two things under **Automations** run by themselves, from the same in-process clock that publishes scheduled posts.
+
+### Feeds
+
+Add the address of an RSS 2.0, RSS 1.0 or Atom feed, choose the accounts or an account group, and write the post text with `{title}`, `{link}` and `{summary}` where the item's own words go. Each new item becomes a post to those accounts. By default it is saved as a draft for you to read; choose **Publish** and it goes out as soon as Broadside sees it.
+
+- **Nothing from the past.** Everything in the feed when you add it is left alone. An item counts as new when it appears later and, if it carries a date, that date is after the feed was added. Resuming a paused feed starts from that moment in the same way.
+- **Never twice.** An item is known by its guid (RSS) or id (Atom), in any capitalisation, or by its link when it has neither. Broadside remembers the items under the feed's address, so a feed you delete and add again does not post them a second time, and the same address cannot be added twice.
+- **Nothing trimmed.** If an item's text does not fit one of the chosen networks, the whole post is saved as a draft with the reason, even when the feed publishes. It cannot be published until you have shortened it or changed its accounts.
+- **At most every 15 minutes.** A feed is read no more often than that. **Check now** reads it at once. A feed that fails records why, and the wait before the next try doubles from 30 minutes up to a day. One check makes at most five posts; the rest follow at the next checks.
+- **Polite fetching.** Broadside sends `If-None-Match` and `If-Modified-Since`, stops reading at 2 MB, and gives up after 15 seconds. It reads the newest 50 items.
+
+A post made from a feed has `"origin": "feed"` and a `feed` with the feed's id, so it can be filtered in **Posts**, over REST and by an agent. Titles and summaries are reduced to plain text before they are put into a post: markup, scripts and styles are removed.
+
+A feed set to publish posts other people's words under your name without anyone reading them. Use it for feeds you write yourself.
+
+### Outgoing webhooks
+
+An outgoing webhook is an address Broadside calls when something happens to a post. It is the reverse of the **Webhook** network under Accounts, which is a destination that receives the posts themselves.
+
+Events: `post.published`, `post.partial` (some networks failed), `post.failed`, `post.scheduled` (also when a scheduled post is edited, and for each new occurrence of a repeating post) and `target.failed` (one network failed for good). Each delivery is a JSON `POST`:
+
+```json
+{ "id": "dlv_…", "event": "post.published", "created_at": "2026-12-01T09:00:02.114Z", "post": { "id": "post_…", "status": "published", "targets": [] } }
+```
+
+`post` is the post exactly as `GET /api/v1/posts/{id}` returns it, which holds no credentials. `target.failed` adds `target`, the one that failed, with its `error`.
+
+Every delivery is signed with that webhook's own secret, shown once when you add it. To change a secret, delete the webhook and add it again.
+
+| Header | Holds |
+| --- | --- |
+| `X-Broadside-Event` | The event name |
+| `X-Broadside-Delivery` | The delivery id. A retry carries the same id, so a receiver can drop one it has already handled |
+| `X-Broadside-Timestamp` | When this try was sent, in seconds since 1970 |
+| `X-Broadside-Event-Signature` | `v1=` and the HMAC-SHA256, in hex, of `<timestamp>.<delivery id>.<body>` keyed with the secret |
+
+To check a delivery, compute that HMAC over the raw body and compare it in constant time, then refuse it if the timestamp is more than five minutes from your clock. The timestamp is part of what is signed, so a captured request cannot be replayed later with a fresh one.
+
+```js
+const expected = "v1=" + crypto.createHmac("sha256", secret).update(`${timestamp}.${deliveryId}.${rawBody}`).digest("hex");
+const ok = crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected)) && Math.abs(Date.now() / 1000 - Number(timestamp)) < 300;
+```
+
+A delivery that fails (anything but a 2xx answer within 10 seconds) is tried again after 30 seconds, 2 minutes, 10 minutes and an hour, then given up on. After five deliveries in a row are given up on, the webhook is paused and says why; send a test, then resume it. A paused webhook is sent nothing, and events from that time are not kept for later. Each webhook shows its latest 25 deliveries with their status, time, response code and attempt, and **Send a test** sends one now.
+
+Deliveries are queued when the event happens and sent by the clock a few seconds later, so a receiver that is slow or down never delays or fails a post. Events are not guaranteed to arrive in order; each carries its own time.
+
+Both are tested the way the connectors are: `npm run verify` runs them end to end against a stand-in feed and a stand-in receiver on this machine, and the unit tests cover the reader with sample RSS and Atom documents. Neither has been run against a live feed or a live receiver from this repository, so try a new feed in draft mode first.
+
 ## Configuration
 
 | Variable | Purpose |
@@ -205,15 +265,22 @@ Credentials are encrypted with AES-256-GCM and never returned by any API. The da
 
 Uploads are checked by their bytes, not their name, and only real images and videos are kept. They are served with a sandboxing policy, so a stored file is shown and never run. Every page carries a closed content security policy and cannot be framed.
 
-Outbound requests to addresses you type (media to import, a Mastodon instance, a webhook) are refused if they point at this machine or a private network, including after a redirect. Opt in with `BROADSIDE_ALLOW_PRIVATE_FETCH=1` for local targets.
+Outbound requests to addresses you type (media to import, a Mastodon instance, a webhook, a feed, an outgoing webhook) are refused if they point at this machine or a private network, including after a redirect. Opt in with `BROADSIDE_ALLOW_PRIVATE_FETCH=1` for local targets.
+
+Feeds are text from someone else's server, and are treated that way. A feed is fetched through the same guard, with a 2 MB cap applied after decompression and a 15 second timeout. The XML reader is Broadside's own and does only what feeds need: it never processes a document type, so a feed that declares entities (the route to entity expansion and to reading local files or internal addresses) is refused whole, and one that only names a public DTD has it skipped and never fetched. Only the five XML entities and numeric references are decoded, once. Depth, element count and items read are capped. Titles and summaries are reduced to plain text and stored and shown as text; nothing from a feed is rendered as HTML, and a link is kept only if it is an http or https address. Placeholders are filled in one pass, so an item cannot smuggle a placeholder into its own text.
+
+Outgoing webhooks send your posts to an address, so they are made by a person, in the app or over REST with a key, and never by an agent. Each has its own signing secret, sealed at rest like credentials, returned once and never again; the delivery log keeps the receiver's status code and nothing else it said. A delivery goes to the address you typed and nowhere else: a redirect is never followed, so the signed body cannot be sent on to another host. A payload is the post as the API returns it and contains no credentials.
 
 Signing in with a network starts from the app or from an API key, never from another site. A pending sign-in is one encrypted row that works once and is gone after ten minutes, and the callback connects nothing for a state value this Broadside did not issue. Where the network supports PKCE (X, TikTok) it is used. The app's secret is sent to the network in a request body or a Basic header, never in an address. Only what posting needs is kept afterwards: for Facebook, Instagram and Threads that is one token, and the app's secret is discarded. A choice of Pages or boards waits in a second row of the same kind, and the browser is shown names, never tokens.
 
-Agents see text that other people control: account names, error messages from networks, links. The MCP server tells agents to treat those as data. If you would rather an agent could never publish on its own, set `BROADSIDE_MCP_DRAFTS_ONLY=1`.
+Agents see text that other people control: account names, error messages from networks, links, and the titles and text that come from feeds. The MCP server tells agents to treat those as data. A draft made from a feed can be edited by an agent and published only by a person, whatever the mode. If you would rather an agent could never publish on its own, set `BROADSIDE_MCP_DRAFTS_ONLY=1`.
 
 Known limits:
 
-- API keys have no scopes and do not expire. Revoke one under Connect when you stop using it.
+- API keys have no scopes and do not expire. Revoke one under Connect when you stop using it. A key can add feeds and outgoing webhooks over REST, so an agent that holds a key and can run commands is not kept from them by the MCP tool list alone.
+- A feed set to publish sends out whatever its source says, including mentions and links, with no one reading it first. Draft is the default for that reason.
+- An agent that reads a feed's draft could still copy its text into a post of its own. The rule stops it publishing the draft; it does not make feed text safe to act on.
+- The address of an outgoing webhook is stored as typed and shown in the app and over REST. If your receiver's address contains a token, anyone who can open Broadside can read it. The signing secret is what a receiver should trust.
 - The private-address check resolves a name before connecting to it, so a hostile DNS server that changes its answer between the two could still get through. It narrows that hole and does not close it.
 - A few networks (Threads, Instagram, Facebook) take the access token in the URL, as their APIs require.
 - An upload is held in memory while it is checked, so the size limit is also a memory limit.
@@ -228,6 +295,8 @@ To put Broadside on the internet, keep it on `127.0.0.1` and publish it through 
 - `src/lib/oauth.ts` is the sign-in every network shares. Each connector describes its own network in an `oauth` block: where to approve, the scopes, the style of PKCE, how the code is exchanged and what is stored. `src/lib/platforms/oauth2.ts` renews tokens before a post and hands rotated ones back to be saved.
 - `src/lib/tags.ts`, `src/lib/groups.ts` and `src/lib/signatures.ts` hold tags, account groups and signatures. Their tables are created by the same additive migration as every column added since the first release, so an existing database gains them and keeps its data.
 - `src/lib/analytics.ts` reads numbers back. A connector's optional `metrics` function asks its network for one post's counts and returns only what the network answered, each under the network's own word. Every reading is stored with its time, and numbers that repeat the reading before move that time on instead of adding a row; a failed one leaves the last good row in place and records the reason. A target is claimed with a compare-and-set before it is read, so two clocks never ask twice, and a 429 pauses that account until the network's wait is over. The scheduler runs this beside publishing and waits for neither.
+- `src/lib/outgoing.ts` holds outgoing webhooks. The engine queues one row per webhook when something happens and does nothing else, so it never waits for a receiver; the scheduler sends what is queued, signs each try afresh, retries with a growing wait and pauses a webhook that keeps failing. A delivery is claimed with a compare-and-set before it is sent.
+- `src/lib/feeds.ts` reads feeds and `src/lib/feed-parse.ts` is the XML reader, written from the RSS and Atom specifications with no parser dependency. An item is remembered before its post is made, so a crash between the two skips the item and can never post it twice.
 - `src/lib/mcp.ts` defines the tools once; `/mcp` (HTTP) and `bin/broadside-mcp.ts` (stdio) both serve them.
 - `src/lib/scheduler.ts` is an in-process clock started with the server.
 

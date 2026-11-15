@@ -6,10 +6,12 @@
  * Exits non-zero on the first thing that is not true.
  */
 import { spawn, spawnSync } from "node:child_process";
+import { createHmac } from "node:crypto";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -54,6 +56,13 @@ const numberReads = { mastodon: [], bluesky: [], discord: [], x: [], facebook: [
 const standinCounts = { mastodon: {}, bluesky: { likeCount: 7, repostCount: 3, replyCount: 1, quoteCount: 0 } };
 const MASTODON_COUNTS = { replies_count: 1, reblogs_count: 2, favourites_count: 4 };
 const numbersDown = new Set();
+// Automations: a feed whose items change while the test runs, and a receiver for outgoing webhooks that can be told to misbehave.
+const standinFeed = { version: 1, items: [], raw: null, reads: [] };
+const receiver = { mode: "ok", requests: [], elsewhere: [], held: [] };
+const feedXml = () =>
+  `<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel><title>Verify Journal</title><link>https://journal.example/</link>${standinFeed.items
+    .map((item) => `<item><title>${item.title}</title>${item.link ? `<link>${item.link}</link>` : ""}<guid isPermaLink="false">${item.guid}</guid>${item.date ? `<pubDate>${new Date(item.date).toUTCString()}</pubDate>` : ""}<description>${item.description ?? ""}</description></item>`)
+    .join("")}</channel></rss>`;
 
 function networks() {
   const server = createServer((req, res) => {
@@ -148,6 +157,38 @@ function networks() {
       if (url === "/hook") {
         received.webhook.push({ body: parsed(), signature: req.headers["x-broadside-signature"] });
         return json({ id: "ext-9", url: "https://example.com/p/9" });
+      }
+      // A feed for Broadside to read. It answers 304 when the validator it gave out is sent back, as a real server does.
+      if (url === "/feed.xml") {
+        standinFeed.reads.push({ ifNoneMatch: req.headers["if-none-match"] ?? null, agent: req.headers["user-agent"] ?? null });
+        const etag = `"verify-feed-${standinFeed.version}"`;
+        if (!standinFeed.raw && req.headers["if-none-match"] === etag) {
+          res.writeHead(304);
+          return res.end();
+        }
+        res.writeHead(200, { "content-type": "application/rss+xml; charset=utf-8", etag });
+        return res.end(standinFeed.raw ?? feedXml());
+      }
+      // The operator's receiver for outgoing webhooks: it keeps every request whole, and can be down, redirect elsewhere, or never answer.
+      if (url === "/receiver") {
+        receiver.requests.push({ headers: req.headers, body: text });
+        if (receiver.mode === "hang") return receiver.held.push(res);
+        if (receiver.mode === "down") {
+          res.writeHead(500);
+          return res.end("the stand-in receiver is down");
+        }
+        if (receiver.mode === "redirect") {
+          // Another host: the same stand-in by its other name.
+          res.writeHead(307, { location: `http://localhost:${req.socket.localPort}/elsewhere` });
+          return res.end();
+        }
+        res.writeHead(200);
+        return res.end("ok");
+      }
+      if (url === "/elsewhere") {
+        receiver.elsewhere.push({ headers: req.headers, body: text });
+        res.writeHead(200);
+        return res.end("ok");
       }
       // The networks that sign in. They live at fixed addresses, so scripts/standin-fetch.mjs sends them here as /<host>/<path>.
       const signedIn = signInNetworks(req, url, new URLSearchParams(text), parsed);
@@ -403,7 +444,7 @@ try {
   await client.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp`), { requestInit: { headers: { authorization: `Bearer ${token}` } } }));
   ok(client.getServerVersion().name === "broadside", "An MCP client completes the handshake over HTTP");
   const tools = (await client.listTools()).tools.map((t) => t.name).sort();
-  const expected = ["cancel_post", "check_post", "connect_account", "create_post", "delete_post", "disconnect_account", "get_analytics", "get_post", "get_post_analytics", "list_accounts", "list_groups", "list_media", "list_platforms", "list_posts", "list_signatures", "list_tags", "publish_post", "retry_target", "stop_series", "update_post", "upload_media"];
+  const expected = ["cancel_post", "check_post", "connect_account", "create_post", "delete_post", "disconnect_account", "get_analytics", "get_post", "get_post_analytics", "list_accounts", "list_feeds", "list_groups", "list_media", "list_outgoing_webhooks", "list_platforms", "list_posts", "list_signatures", "list_tags", "publish_post", "retry_target", "stop_series", "update_post", "upload_media"];
   ok(expected.every((name) => tools.includes(name)), `The server offers its ${expected.length} tools`, `got ${tools.join(", ")}`);
   const call = async (name, args = {}) => client.callTool({ name, arguments: args });
 
@@ -634,6 +675,7 @@ try {
     ["/app/calendar", "Calendar"],
     ["/app/analytics", "Analytics"],
     ["/app/media", "Media library"],
+    ["/app/automations", "No feeds yet."],
     ["/app/accounts", "Accounts"],
     ["/app/connect", "/mcp"],
     ["/login", "Sign in"],
@@ -1178,6 +1220,274 @@ try {
   const quietPeriod = await page(`/app/analytics?account=${ids.slack}`);
   ok(quietPeriod.includes("No numbers have been read for these posts yet.") && quietPeriod.includes("Not available for Slack.") && !quietPeriod.includes('id="chart-title"'), "For an account whose network has no numbers, the page says so and draws no chart");
   ok((await page("/app")).includes('href="/app/analytics"'), "The rail links to Analytics");
+
+  // Automations ---------------------------------------------------------------
+  // Outgoing webhooks: Broadside calls an address when something happens to a post. The stand-in receiver checks every request as a careful one would.
+  const emptyAutomations = await page("/app/automations");
+  ok(emptyAutomations.includes("Automations") && emptyAutomations.includes("No feeds yet.") && emptyAutomations.includes("No outgoing webhooks yet.") && emptyAutomations.includes("connect the Webhook network under Accounts instead"), "The Automations page starts empty and tells an outgoing webhook apart from the Webhook network");
+  ok((await page("/app")).includes('href="/app/automations"'), "The rail links to Automations");
+  const phoneBar = (html) => html.match(/<nav[^>]*data-phone-bar[^>]*>([\s\S]*?)<\/nav>/)?.[1] ?? "";
+  const barOnCompose = phoneBar(await page("/app"));
+  const barOnAccounts = phoneBar(await page("/app/accounts"));
+  ok(
+    (barOnCompose.match(/<a /g) ?? []).length === 4 && (barOnCompose.match(/<button/g) ?? []).length === 1 && />More</.test(barOnCompose.replace(/<svg[\s\S]*?<\/svg>/g, "")) && ["/app", "/app/posts", "/app/calendar", "/app/analytics"].every((href) => barOnCompose.includes(`href="${href}"`)),
+    "The phone bar holds five items: Compose, Posts, Calendar, Analytics and More",
+    barOnCompose.slice(0, 600),
+  );
+  ok(
+    /aria-current="page"[^>]*href="\/app"|href="\/app"[^>]*aria-current="page"/.test(barOnCompose) && barOnCompose.includes('data-current="false"') && barOnAccounts.includes('data-current="true"') && !barOnAccounts.includes('aria-current="page"') && barOnAccounts.includes("showing Accounts"),
+    "The phone bar marks the screen in view: its own item, or More when the screen is behind it",
+  );
+  ok((await api("/api/v1/outgoing-webhooks")).status === 401 && (await api("/api/v1/feeds")).status === 401 && (await api("/api/v1/feeds", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })).status === 401, "The feeds and outgoing webhooks API refuses a request with no key");
+
+  // What a careful receiver does: recompute the signature over the time, the delivery id and the body, and refuse a time far from its own clock.
+  const signatureHolds = (secret, request) =>
+    request.headers["x-broadside-event-signature"] === `v1=${createHmac("sha256", secret).update(`${request.headers["x-broadside-timestamp"]}.${request.headers["x-broadside-delivery"]}.${request.body}`).digest("hex")}`;
+  const signedBy = (secret, request) => signatureHolds(secret, request) && Math.abs(Date.now() / 1000 - Number(request.headers["x-broadside-timestamp"])) < 300;
+  const eventsFor = (postId, event) => receiver.requests.filter((r) => r.headers["x-broadside-event"] === event && JSON.parse(r.body).post?.id === postId);
+  const heard = (postId, event, label = `${event} to reach the receiver`) => until(() => eventsFor(postId, event)[0], label, 20000);
+  const quickPost = (content, accounts = [ids.sandbox], extra = {}) => via("POST", "/posts", { content, targets: accounts.map((account_id) => ({ account_id })), ...extra });
+
+  const hookMade = await via("POST", "/outgoing-webhooks", { name: "Verify receiver", url: `${net}/receiver` });
+  const hookId = hookMade.body.data?.id;
+  const hookSecret = hookMade.body.data?.secret ?? "";
+  ok(hookMade.status === 200 && /^owh_/.test(hookId) && /^whsec_[\w-]{43}$/.test(hookSecret) && hookMade.body.data.events.length === 5 && hookMade.body.data.status === "active", "An outgoing webhook is created with its own signing secret, shown in that reply", JSON.stringify(hookMade.body));
+  const hookOf = async () => (await via("GET", `/outgoing-webhooks/${hookId}`)).body.data;
+  const hooksListed = await via("GET", "/outgoing-webhooks");
+  ok(hooksListed.body.data.length === 1 && !JSON.stringify([hooksListed.body, await hookOf()]).includes(hookSecret) && !JSON.stringify(hooksListed.body).includes("secret"), "The secret is never returned again, by the list or by the webhook itself");
+  const hookBad = await via("POST", "/outgoing-webhooks", { name: "Bad", url: "ftp://example.com/hook" });
+  ok(hookBad.status === 400 && /must start with https:\/\/ or http:\/\//.test(hookBad.body.error.message), "An address that is not http or https is refused with the reason");
+
+  const tested = await via("POST", `/outgoing-webhooks/${hookId}/test`);
+  const testRequest = receiver.requests.at(-1);
+  ok(
+    tested.status === 200 && tested.body.data.status === "delivered" && tested.body.data.response_code === 200 && tested.body.data.attempts === 1 && testRequest.headers["x-broadside-event"] === "webhook.test" && signedBy(hookSecret, testRequest) && JSON.parse(testRequest.body).post === null,
+    "Send a test delivers a signed test request at once and reports the receiver's answer",
+    JSON.stringify(tested.body),
+  );
+
+  const announcedPost = await quickPost("announced to the receiver", [ids.sandbox, ids.mastodon]);
+  const published = await heard(announcedPost.body.data.id, "post.published");
+  const publishedBody = JSON.parse(published.body);
+  ok(
+    announcedPost.body.data.status === "published" && signedBy(hookSecret, published) && published.headers["content-type"] === "application/json" && /^dlv_/.test(published.headers["x-broadside-delivery"]) && publishedBody.id === published.headers["x-broadside-delivery"] && publishedBody.event === "post.published" && Math.abs(Date.parse(publishedBody.created_at) - Date.now()) < 120000,
+    "Publishing a post calls the receiver with post.published: an event name, a time, a delivery id, and a signature over the time, the id and the body",
+  );
+  const readBack = (await via("GET", `/posts/${announcedPost.body.data.id}`)).body.data;
+  ok(JSON.stringify(publishedBody.post) === JSON.stringify(readBack) && publishedBody.post.targets.length === 2, "The delivery carries the post exactly as the REST API returns it");
+  ok(
+    receiver.requests.every((r) => [SECRET_TOKEN, SECRET_SIGNING, hookSecret, token, ...everySecret].filter(Boolean).every((secret) => !r.body.includes(secret) && !JSON.stringify(r.headers).includes(secret))),
+    "No delivery carries a credential, an API key or the signing secret",
+  );
+  const tampered = { ...published, body: published.body.replace("announced to the receiver", "announced to someone else") };
+  const replayedLater = { ...published, headers: { ...published.headers, "x-broadside-timestamp": String(Number(published.headers["x-broadside-timestamp"]) - 3600) } };
+  ok(!signedBy(hookSecret, tampered) && !signedBy(hookSecret, replayedLater) && !signedBy("whsec_wrong", published), "A changed body, a moved timestamp or the wrong secret fails the receiver's check");
+  const logged = (await hookOf()).deliveries.find((d) => d.id === published.headers["x-broadside-delivery"]);
+  ok(logged.status === "delivered" && logged.response_code === 200 && logged.attempts === 1 && logged.event === "post.published" && Boolean(logged.attempted_at), "The delivery log records the status, the time, the response code and the attempt");
+
+  const wentWrong = await quickPost("the receiver hears this fail [fail]");
+  const targetFailed = JSON.parse((await heard(wentWrong.body.data.id, "target.failed")).body);
+  await heard(wentWrong.body.data.id, "post.failed");
+  ok(wentWrong.body.data.status === "failed" && targetFailed.target.status === "failed" && /asked to fail/.test(targetFailed.target.error) && targetFailed.target.id === wentWrong.body.data.targets[0].id, "A failed target is announced with the target and its reason, and the post as post.failed");
+  const halfWay = await quickPost("half of this fails [fail]", [ids.sandbox, ids.mastodon]);
+  await heard(halfWay.body.data.id, "post.partial");
+  ok(halfWay.body.data.status === "partial" && eventsFor(halfWay.body.data.id, "post.published").length === 0, "A post that reaches some networks and not others is announced as post.partial");
+  const willGo = await quickPost("the receiver hears this scheduled", [ids.sandbox], { publish_at: inAnHour() });
+  await heard(willGo.body.data.id, "post.scheduled");
+  ok(JSON.parse(eventsFor(willGo.body.data.id, "post.scheduled")[0].body).post.status === "scheduled", "A scheduled post is announced as post.scheduled");
+  await via("POST", `/posts/${willGo.body.data.id}/cancel`);
+  ok(receiver.requests.length >= 7 && receiver.requests.every((r) => signatureHolds(hookSecret, r)), "Every delivery so far was signed with this webhook's secret");
+
+  // A receiver that is down: the post still publishes at once, and the delivery is kept for another try
+  receiver.mode = "down";
+  const whileDown = await quickPost("published while the receiver is down");
+  const retrying = await until(async () => (await hookOf()).deliveries.find((d) => d.post_id === whileDown.body.data.id && d.status === "retrying"), "the failed delivery to be queued for a retry", 20000);
+  ok(
+    whileDown.body.data.status === "published" && retrying.response_code === 500 && retrying.attempts === 1 && /answered 500/.test(retrying.error) && Date.parse(retrying.next_attempt_at) - Date.now() > 10000 && !JSON.stringify(retrying).includes("stand-in receiver is down"),
+    "With the receiver down the post is published anyway, and the delivery is logged as failed once and waiting to be tried again",
+    JSON.stringify(retrying),
+  );
+  // A receiver that redirects to another host: the signed request stops there
+  receiver.mode = "redirect";
+  const sentAway = await quickPost("the receiver redirects this one");
+  const stopped = await until(async () => (await hookOf()).deliveries.find((d) => d.post_id === sentAway.body.data.id && d.status === "failed"), "the redirected delivery to be given up on", 20000);
+  ok(receiver.elsewhere.length === 0 && /answered with a redirect/.test(stopped.error) && stopped.attempts === 1 && stopped.next_attempt_at === null, "A redirect to another host is not followed: nothing signed reaches it, and the delivery says why it stopped");
+  receiver.mode = "ok";
+
+  // Paused, it hears nothing; resumed, it hears the next post
+  const pausedHook = await via("PATCH", `/outgoing-webhooks/${hookId}`, { paused: true });
+  const unheard = await quickPost("published while the webhook is paused");
+  await sleep(1500);
+  ok(pausedHook.body.data.status === "paused" && unheard.body.data.status === "published" && eventsFor(unheard.body.data.id, "post.published").length === 0 && (await hookOf()).deliveries.every((d) => d.post_id !== unheard.body.data.id), "A paused webhook is sent nothing");
+  const resumedHook = await via("PATCH", `/outgoing-webhooks/${hookId}`, { paused: false, name: "Verify receiver, renamed" });
+  const heardAgain = await quickPost("published after resuming");
+  await heard(heardAgain.body.data.id, "post.published");
+  ok(resumedHook.body.data.status === "active" && resumedHook.body.data.name === "Verify receiver, renamed", "A webhook can be renamed and resumed, and hears the next post");
+
+  // Feeds: new items become posts; nothing from before the feed was added, and never the same item twice
+  const feedPosts = async (feedId) => (await via("GET", `/posts?origin=feed&feed_id=${feedId}&limit=100`)).body.data;
+  const checkNow = async (feedId) => (await via("POST", `/feeds/${feedId}/check`)).body.data;
+  standinFeed.items = [
+    { guid: "https://journal.example/?p=1", title: "Already there, dated last week", link: "https://journal.example/1", date: Date.now() - 7 * 86400000 },
+    { guid: "https://journal.example/?p=2", title: "Already there, with no date", link: "https://journal.example/2" },
+    { guid: "https://journal.example/?p=3", title: "Already there, dated tomorrow", link: "https://journal.example/3", date: Date.now() + 86400000 },
+  ];
+  const mastodonBeforeFeeds = received.mastodon.length;
+  const feedMade = await via("POST", "/feeds", { url: `${net}/feed.xml`, account_ids: [ids.sandbox, ids.mastodon], template: "{title}\n{summary}\n{link}" });
+  const feedId = feedMade.body.data?.id;
+  ok(
+    feedMade.status === 200 && /^feed_/.test(feedId) && feedMade.body.data.title === "Verify Journal" && feedMade.body.data.action === "draft" && feedMade.body.data.accounts.length === 2 && feedMade.body.data.last_checked_at && feedMade.body.data.last_error === null && standinFeed.reads[0].agent === "Broadside (feed reader)",
+    "A feed is added by its address: Broadside reads it once, takes its title, and saves drafts unless told otherwise",
+    JSON.stringify(feedMade.body),
+  );
+  const notAFeed = await via("POST", "/feeds", { url: `${net}/pixel.png`, account_ids: [ids.sandbox] });
+  const twice = await via("POST", "/feeds", { url: `${net}/feed.xml/`, account_ids: [ids.sandbox] });
+  ok(notAFeed.status === 400 && /not well-formed|did not return an RSS or Atom feed/.test(notAFeed.body.error.message) && twice.status === 400 && /already added/.test(twice.body.error.message), "An address that is not a feed is refused, and so is the same feed a second time");
+  const firstCheck = await checkNow(feedId);
+  ok(firstCheck.outcome === "unchanged" && standinFeed.reads.at(-1).ifNoneMatch === '"verify-feed-1"' && (await feedPosts(feedId)).length === 0, "Checking again sends If-None-Match, takes 304 as nothing new, and posts nothing that was there when the feed was added");
+
+  const longSummary = "word ".repeat(150).trim();
+  standinFeed.items.unshift(
+    { guid: "https://journal.example/?p=5", title: "Too long for Mastodon", link: "https://journal.example/5", date: Date.now() + 2000, description: longSummary },
+    { guid: "https://journal.example/?p=4", title: "Fresh &lt;b&gt;ink&lt;/b&gt; &amp;amp; paper &amp;lt;img src=x onerror=alert(1)&amp;gt;", link: "https://journal.example/4", date: Date.now() + 1000, description: "<![CDATA[<p>Printed <i>today</i>.</p><script>alert(1)</script>]]>" },
+  );
+  standinFeed.version++;
+  const secondCheck = await checkNow(feedId);
+  let fromFeed = await feedPosts(feedId);
+  const fresh = fromFeed.find((p) => p.content.startsWith("Fresh"));
+  const tooLongPost = fromFeed.find((p) => p.content.startsWith("Too long"));
+  ok(secondCheck.outcome === "checked" && secondCheck.post_ids.length === 2 && fromFeed.length === 2, "Two new items become two posts, and the three that were already there become none", JSON.stringify(secondCheck));
+  ok(
+    fresh.status === "draft" && fresh.origin === "feed" && fresh.feed.id === feedId && fresh.feed.title === "Verify Journal" && fresh.held_reason === null && fresh.content === "Fresh ink & paper <img src=x onerror=alert(1)>\nPrinted today.\nhttps://journal.example/4" && fresh.targets.length === 2,
+    "A new item is saved as a draft from the template, as plain text, marked with its origin and its feed",
+    JSON.stringify(fresh),
+  );
+  ok(
+    tooLongPost.status === "draft" && /^Mastodon allows 500 characters; this is \d+\.$/.test(tooLongPost.held_reason) && tooLongPost.content === `Too long for Mastodon\n${longSummary}\nhttps://journal.example/5` && received.mastodon.length === mastodonBeforeFeeds,
+    "An item too long for one account is saved whole as a draft with the reason, and nothing is sent",
+    JSON.stringify([tooLongPost.status, tooLongPost.held_reason]),
+  );
+  const pushedTooLong = await via("POST", `/posts/${tooLongPost.id}/publish`);
+  ok(pushedTooLong.status === 400 && /Mastodon allows 500 characters/.test(pushedTooLong.body.error.message) && received.mastodon.length === mastodonBeforeFeeds, "The held draft cannot be published until it fits");
+  const shortened = await via("PATCH", `/posts/${tooLongPost.id}`, { content: "Too long for Mastodon, shortened by a person" });
+  const sentShortened = await via("POST", `/posts/${tooLongPost.id}/publish`);
+  ok(shortened.body.data.held_reason === null && sentShortened.body.data.status === "published" && received.mastodon.at(-1).status === "Too long for Mastodon, shortened by a person", "Shortened by a person, it publishes like any draft");
+  // Text from a feed is shown as text. The item's title spelled out an image tag; on the page it is characters, never an element.
+  const asText = await page(`/app/posts?feed=${feedId}`);
+  ok(asText.includes("&lt;img src=x onerror=alert(1)&gt;") && !/<img src=x onerror/.test(asText) && !/<script>alert\(1\)<\/script>/.test(asText), "Markup spelled out in a feed reaches the page as characters, never as markup");
+  ok((await via("GET", "/posts?origin=feed&limit=100")).body.data.every((p) => p.origin === "feed") && (await via("GET", "/posts?origin=api&limit=100")).body.data.every((p) => p.origin === "api"), "Posts can be filtered by where they came from");
+
+  // The same items under guids in another case are not new
+  standinFeed.items = standinFeed.items.map((item) => ({ ...item, guid: item.guid.toUpperCase() }));
+  standinFeed.version++;
+  const thirdCheck = await checkNow(feedId);
+  ok(thirdCheck.outcome === "checked" && thirdCheck.post_ids.length === 0 && (await feedPosts(feedId)).length === 2, "A feed that changes the case of its guids has published nothing new");
+
+  // The scheduler reads a feed when it is due, without being asked
+  standinFeed.items.unshift({ guid: "https://journal.example/?p=6", title: "Found by the scheduler", link: "https://journal.example/6", date: Date.now() + 3000 });
+  standinFeed.version++;
+  const beforeDue = (await via("GET", `/feeds/${feedId}`)).body.data;
+  await sleep(1500);
+  ok(Date.parse(beforeDue.next_check_at) - Date.now() > 13 * 60000 && (await feedPosts(feedId)).length === 2, "A feed just checked is left alone by the scheduler: its next check is about fifteen minutes away");
+  const direct = new DatabaseSync(path.join(dataDir, "broadside.db"));
+  direct.exec("PRAGMA busy_timeout = 5000");
+  direct.prepare("UPDATE feeds SET next_check_at = ? WHERE id = ?").run(new Date(Date.now() - 1000).toISOString(), feedId);
+  direct.close();
+  const foundByClock = await until(async () => (await feedPosts(feedId)).find((p) => p.content.startsWith("Found by the scheduler")), "the scheduler to read the due feed", 20000);
+  ok(foundByClock.status === "draft" && foundByClock.origin === "feed", "When a feed comes due, the scheduler reads it and makes the post");
+
+  // Publishing instead of drafting, and the outgoing webhook hears it
+  const toPublish = await via("PATCH", `/feeds/${feedId}`, { action: "publish", template: "{title}\n\n{link}" });
+  standinFeed.items.unshift({ guid: "https://journal.example/?p=7", title: "Goes straight out", link: "https://journal.example/7", date: Date.now() + 4000 });
+  standinFeed.version++;
+  const fourthCheck = await checkNow(feedId);
+  const straightOut = (await feedPosts(feedId)).find((p) => p.id === fourthCheck.post_ids[0]);
+  ok(toPublish.body.data.action === "publish" && straightOut.status === "published" && straightOut.origin === "feed" && received.mastodon.at(-1).status === "Goes straight out\n\nhttps://journal.example/7", "A feed set to publish sends a new item out at once");
+  const feedEvent = JSON.parse((await heard(straightOut.id, "post.published")).body);
+  ok(feedEvent.post.origin === "feed" && feedEvent.post.feed.id === feedId, "The outgoing webhook hears a post made from a feed, with its origin");
+
+  // A feed that turns hostile is refused, recorded, and left alone for longer
+  standinFeed.raw = `<?xml version="1.0"?><!DOCTYPE lolz [<!ENTITY lol "lol"><!ENTITY lol2 "&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;"><!ENTITY lol3 "&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;"><!ENTITY xxe SYSTEM "file:///etc/passwd">]><rss version="2.0"><channel><title>&lol3;&xxe;</title><item><guid>evil</guid><title>&lol3;&xxe;</title></item></channel></rss>`;
+  const hostile = await checkNow(feedId);
+  ok(
+    hostile.outcome === "failed" && /declares its own document type or entities/.test(hostile.feed.last_error) && hostile.post_ids.length === 0 && Date.parse(hostile.feed.next_check_at) - Date.now() > 25 * 60000 && !JSON.stringify(hostile).includes("root:"),
+    "A feed that declares entities is refused with the reason, nothing is posted from it, and its next check is pushed back",
+    JSON.stringify(hostile.feed.last_error),
+  );
+  standinFeed.raw = `<rss><channel><title>${"x".repeat(2 * 1024 * 1024)}</title></channel></rss>`;
+  const oversized = await checkNow(feedId);
+  ok(oversized.outcome === "failed" && /larger than 2 MB/.test(oversized.feed.last_error) && Date.parse(oversized.feed.next_check_at) - Date.now() > 55 * 60000, "A feed larger than the cap is not read, and the wait grows with each failure");
+  standinFeed.raw = null;
+  const healed = await checkNow(feedId);
+  ok(healed.outcome === "unchanged" || (healed.outcome === "checked" && healed.post_ids.length === 0), "When the feed is itself again, the error clears");
+  ok(healed.feed.last_error === null, "A feed that reads cleanly again shows no error");
+
+  // A dry run, pausing, and adding the feed again
+  const postsBeforePreview = (await feedPosts(feedId)).length;
+  const dryRun = await via("POST", `/feeds/${feedId}/test`);
+  ok(dryRun.status === 200 && dryRun.body.data.title === "Verify Journal" && dryRun.body.data.newest.text === "Goes straight out\n\nhttps://journal.example/7" && dryRun.body.data.newest.problems.length === 0 && (await feedPosts(feedId)).length === postsBeforePreview, "A feed's test shows the post its newest item would make, and makes none");
+  const feedPaused = await via("PATCH", `/feeds/${feedId}`, { paused: true });
+  const whilePaused = await checkNow(feedId);
+  ok(feedPaused.body.data.status === "paused" && whilePaused.outcome === "skipped" && /paused/.test(whilePaused.message), "A paused feed is not read");
+  const feedDeleted = await via("DELETE", `/feeds/${feedId}`);
+  const feedAgain = await via("POST", "/feeds", { url: `${net}/feed.xml`, account_ids: [ids.sandbox], action: "publish" });
+  const againId = feedAgain.body.data?.id;
+  standinFeed.items.unshift({ guid: "https://journal.example/?p=8", title: "New to the feed added again", link: "https://journal.example/8", date: Date.now() + 5000 });
+  standinFeed.version++;
+  const afterAgain = await checkNow(againId);
+  const madeAgain = await feedPosts(againId);
+  ok(
+    feedDeleted.status === 200 && againId !== feedId && afterAgain.post_ids.length === 1 && madeAgain.length === 1 && madeAgain[0].content.startsWith("New to the feed added again") && afterAgain.feed.posts.total === postsBeforePreview + 1 && (await feedPosts(feedId)).length === postsBeforePreview,
+    "Deleted and added again, the feed posts only what is new: nothing it posted before goes out twice, and those posts are still there",
+    JSON.stringify([afterAgain.post_ids.length, afterAgain.feed.posts.total, postsBeforePreview]),
+  );
+
+  // Agents can look, and nothing more
+  const watcher = new Client({ name: "verify-automations", version: "1.0.0" });
+  await watcher.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp`), { requestInit: { headers: { authorization: `Bearer ${token}` } } }));
+  const automationTools = (await watcher.listTools()).tools.filter((t) => /feed|webhook/.test(t.name));
+  ok(automationTools.map((t) => t.name).sort().join(",") === "list_feeds,list_outgoing_webhooks" && automationTools.every((t) => t.annotations?.readOnlyHint === true), "An agent has two read-only tools for automations, and none that creates, changes or deletes a feed or an outgoing webhook");
+  const agentHooks = await watcher.callTool({ name: "list_outgoing_webhooks", arguments: {} });
+  const agentFeeds = await watcher.callTool({ name: "list_feeds", arguments: {} });
+  ok(
+    result(agentHooks)[0].site === net && !("url" in result(agentHooks)[0]) && !agentHooks.content[0].text.includes(hookSecret) && !agentHooks.content[0].text.includes("/receiver") && result(agentHooks)[0].deliveries.length > 0 && result(agentFeeds)[0].id === againId && result(agentFeeds)[0].posts.total === postsBeforePreview + 1,
+    "list_outgoing_webhooks names the site a webhook calls and its deliveries, never its secret; list_feeds shows each feed and what it made",
+  );
+  const agentFeedPosts = result(await watcher.callTool({ name: "list_posts", arguments: { origin: "feed", feed_id: feedId, limit: 100 } }));
+  const agentPush = await watcher.callTool({ name: "publish_post", arguments: { post_id: fresh.id } });
+  const agentEdit = result(await watcher.callTool({ name: "update_post", arguments: { post_id: fresh.id, content: "Fresh ink, reworded by an agent", draft: false } }));
+  ok(agentFeedPosts.length === postsBeforePreview && agentPush.isError === true && /a person publishes it/.test(agentPush.content[0].text) && agentEdit.status === "draft" && agentEdit.content === "Fresh ink, reworded by an agent", "An agent can find and edit a draft made from a feed, and cannot publish it");
+  await watcher.close();
+
+  // The screens
+  const automationsPage = await page("/app/automations");
+  ok(
+    automationsPage.includes("Verify Journal") && automationsPage.includes("Is published straight away") && automationsPage.includes("Last checked") && automationsPage.includes("posts made") && automationsPage.includes(`/app/posts?feed=${againId}`) && automationsPage.includes("Check now"),
+    "The Automations page shows each feed with when it was last checked and the posts it made",
+  );
+  ok(
+    automationsPage.includes("Verify receiver, renamed") && automationsPage.includes("Send a test") && automationsPage.includes("post.published") && automationsPage.includes("Delivered") && automationsPage.includes("HTTP 200") && automationsPage.includes("Attempt 1") && !automationsPage.includes(hookSecret),
+    "It shows each outgoing webhook with its delivery log: status, time, response code and attempt, and never its secret",
+  );
+  const feedPostsPage = await page(`/app/posts?feed=${feedId}`);
+  ok(
+    feedPostsPage.includes("Posts made from the feed") && feedPostsPage.includes("Found by the scheduler") && feedPostsPage.includes("From a feed") && !feedPostsPage.includes("Broadside verify: one post, every network.") && feedPostsPage.includes("Show all posts"),
+    "The posts page can show one feed's posts on their own",
+  );
+  const fedPost = await page(`/app/posts?post=${foundByClock.id}`);
+  ok(fedPost.includes("Made from an item in the feed") && fedPost.includes("From a feed"), "A post made from a feed says so where it is listed");
+
+  // A receiver that never answers holds up nothing: the post is out at once, and the scheduler still publishes what comes due
+  receiver.mode = "hang";
+  const hangStarted = Date.now();
+  const whileHanging = await quickPost("published while the receiver hangs");
+  const tookMs = Date.now() - hangStarted;
+  await until(() => receiver.held.length > 0, "the hanging delivery to be attempted", 20000);
+  const dueSoon = await quickPost("comes due while the receiver hangs", [ids.sandbox], { publish_at: new Date(Date.now() + 1500).toISOString() });
+  const outOnTime = await until(async () => ((await via("GET", `/posts/${dueSoon.body.data.id}`)).body.data.status === "published" ? Date.now() : null), "the scheduler to publish while a delivery hangs", 8000);
+  ok(whileHanging.body.data.status === "published" && tookMs < 3000 && receiver.held.length > 0 && outOnTime - hangStarted < 9500, `A receiver that never answers delays no post: published in ${tookMs} ms, and a scheduled post went out on time while the delivery hung`);
+  receiver.mode = "ok";
+  for (const waiting of receiver.held) waiting.destroy();
 
   // The optional password: a second boot with BROADSIDE_PASSWORD set
   app.kill("SIGTERM");
