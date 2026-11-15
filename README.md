@@ -17,6 +17,8 @@ A broadside is a single printed sheet posted in public, and a ship firing every 
 Needs Node 22.5 or newer.
 
 ```bash
+git clone https://github.com/Balackburn/broadside.git
+cd broadside
 npm install
 npm run build
 npm start

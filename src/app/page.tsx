@@ -30,7 +30,9 @@ const MCP_SNIPPET = `claude mcp add --transport http broadside \\
   http://localhost:3000/mcp \\
   --header "Authorization: Bearer bs_your_key"`;
 
-const SELF_HOST = `npm install
+const SELF_HOST = `git clone https://github.com/Balackburn/broadside.git
+cd broadside
+npm install
 npm run build
 npm start        # http://localhost:3000`;
 
@@ -77,8 +79,8 @@ export default function Home() {
                 <Link className="btn btn-signal btn-lg" href="/app">
                   Open the app
                 </Link>
-                <a className="btn btn-quiet btn-lg" href="#self-host">
-                  Run it yourself
+                <a className="btn btn-quiet btn-lg" href="https://github.com/Balackburn/broadside">
+                  Get the source
                 </a>
               </div>
             </Fan>
