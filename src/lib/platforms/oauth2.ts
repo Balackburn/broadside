@@ -64,8 +64,14 @@ export function stale(c: Credentials, now = Date.now()): boolean {
  * spent. X's refresh tokens work once, and two posts for one account can go
  * out together, each holding the same stored token. The second finds the
  * first's answer here instead of spending a token that is already used up.
+ *
+ * The map is kept on globalThis, as the database handle is: the built server
+ * holds this module more than once (the scheduler is its own bundle, apart
+ * from the API routes), and a renewal the scheduler starts while reading a
+ * post's numbers must be found by a post going out through a route.
  */
-const recent = new Map<string, { at: number; tokens: Promise<Credentials> }>();
+type Renewals = Map<string, { at: number; tokens: Promise<Credentials> }>;
+const recent: Renewals = ((globalThis as typeof globalThis & { __broadsideRenewals?: Renewals }).__broadsideRenewals ??= new Map());
 const REMEMBER_MS = 10 * 60_000;
 
 /** Trades the refresh token for a new access token, and for a new refresh token where the network rotates them. */

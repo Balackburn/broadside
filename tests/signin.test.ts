@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 process.env.BROADSIDE_DATA_DIR = mkdtempSync(path.join(tmpdir(), "broadside-signin-"));
 process.env.BROADSIDE_SECRET = "test-secret";
@@ -261,6 +261,31 @@ describe("X", () => {
     const posts = await Promise.all([createPost({ content: "first", targets: [{ account_id: account.id }] }, net.fetcher), createPost({ content: "second", targets: [{ account_id: account.id }] }, net.fetcher)]);
     expect(posts.map((p) => p.status)).toEqual(["published", "published"]);
     expect(net.calls.slice(from).filter((c) => c.path === "https://api.x.com/2/oauth2/token")).toHaveLength(1);
+  });
+
+  it("spends a refresh token once across two copies of the module, as the scheduler and the routes each hold one", async () => {
+    const spec = connector("x")!.oauth!;
+    const stored = { client_id: "xid", client_secret: "x-app-secret", access_token: "old", refresh_token: "x-refresh-shared", expires_at: PAST };
+    let renewals = 0;
+    const fetcher = (async () => {
+      renewals++;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      // X's refresh tokens work once: a second request with the same one is refused.
+      return renewals === 1 ? Response.json({ access_token: "new", refresh_token: "x-refresh-next", expires_in: 7200 }) : refused({ error: "invalid_request", error_description: "Value passed for the token was invalid." });
+    }) as typeof fetch;
+    const ctx = { fetch: fetcher } as Parameters<typeof import("@/lib/platforms/oauth2").refresh>[3];
+    // Two separate loads of the module stand for the two bundles of the built server.
+    vi.resetModules();
+    const routes = await import("@/lib/platforms/oauth2");
+    vi.resetModules();
+    const scheduler = await import("@/lib/platforms/oauth2");
+    expect(routes.refresh).not.toBe(scheduler.refresh);
+    const [a, b] = await Promise.all([scheduler.refresh("X", spec, stored, ctx), routes.refresh("X", spec, stored, ctx)]);
+    expect(renewals).toBe(1);
+    expect([a.refresh_token, b.refresh_token, a.access_token, b.access_token]).toEqual(["x-refresh-next", "x-refresh-next", "new", "new"]);
+    // A caller that read the old token just before the new one was saved still gets the renewal, not a refusal.
+    expect((await routes.refresh("X", spec, stored, ctx)).refresh_token).toBe("x-refresh-next");
+    expect(renewals).toBe(1);
   });
 
   it("reports X's own reason when it will not renew, and marks the account for reconnecting", async () => {
