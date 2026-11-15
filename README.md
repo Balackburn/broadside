@@ -75,7 +75,9 @@ Add `"thread": ["second part", "third part"]` for a thread, and `"repeat": {"eve
 | Method and path | Does |
 | --- | --- |
 | `GET /platforms` | Networks, limits and credential fields |
-| `GET, POST /accounts` · `DELETE /accounts/{id}` | Connected accounts |
+| `GET, POST /accounts` · `DELETE /accounts/{id}` | Connected accounts. `POST` takes `{"platform", "credentials"}` with tokens you made yourself |
+| `POST /oauth/{platform}/start` | Begin a sign-in with your app's id and secret; returns the address to open in a browser |
+| `GET, POST /oauth/choices/{id}` | After a sign-in that ends in a choice: what is on offer, and `{"choices": [ids]}` to connect them |
 | `GET, POST /media` · `PATCH, DELETE /media/{id}` | Upload (multipart `file`) or import (`{"url"}`), set alt text |
 | `POST /check` | Dry run against each account's rules |
 | `GET, POST /posts` · `GET, PATCH, DELETE /posts/{id}` | Create (send an `Idempotency-Key` header), read, edit |
@@ -92,14 +94,33 @@ You connect each account with credentials you create yourself; the app shows the
 | --- | --- |
 | Bluesky, Mastodon, Telegram, Discord, Slack, Nostr, Lemmy, DEV, Reddit, Webhook | X, Threads, LinkedIn, Instagram, Facebook Pages, TikTok, YouTube, Pinterest |
 
+The networks in the second column connect by signing in. You paste your app's id and secret, press **Continue with** the network, approve on its own page, and land back in Broadside connected. Broadside has no app of its own with any network, so nothing is shared with anyone else's install. The dialog shows the exact redirect address to register in your app and the permissions it will ask for.
+
+| Network | Redirect address on your own machine | How long a sign-in lasts |
+| --- | --- | --- |
+| X | `http://127.0.0.1:3000` (X refuses `localhost`) | Two hours at a time, renewed each time Broadside posts. Lapses after about six months without a post. |
+| LinkedIn | `http://localhost:3000` | 60 days, then reconnect. Apps LinkedIn has approved for refresh tokens are renewed for a year. |
+| Threads | None: https only | 60 days, refreshed each time Broadside posts. |
+| Facebook Pages, Instagram | `http://localhost:3000`, while the Meta app is in development mode | The Page token does not expire. |
+| YouTube | `http://localhost:3000` or `http://127.0.0.1:3000` | Until you revoke it. Seven days while the Google app's consent screen is in Testing. |
+| Pinterest | `http://localhost:3000` | 30 days, renewed when Broadside posts. Lapses after 60 days without a post. |
+| TikTok | The address shown in the dialog | Renewed each time Broadside posts. |
+
+Broadside answers on both `localhost` and `127.0.0.1`, and uses the one each network accepts whichever you browse by. With `BROADSIDE_PUBLIC_URL` set, that address is used for every network.
+
+After signing in to Facebook or Instagram you pick which Pages or Instagram accounts to connect, and each becomes its own account. Pinterest asks which board to pin to. YouTube connects the channel of the Google account you signed in with.
+
+Threads accepts only https redirect addresses, so on `http://localhost` its dialog asks for a token from the Threads User token generator instead. Every sign-in network can also be connected with tokens you made by hand: choose **Paste tokens instead** in the dialog, or send them to `POST /api/v1/accounts`. `GET /api/v1/platforms` lists the fields for each under `oauth.paste`. X accounts connected with the four OAuth 1.0a keys keep working.
+
 Things worth knowing before you rely on a network:
 
-- **These connectors are tested against each network's documented API shapes, not against the live networks.** `npm run verify` exercises Mastodon, Bluesky, Discord, Telegram, Slack and the webhook against local stand-ins; the rest are covered by request-shape tests. Try a new account with one post before scheduling many.
+- **These connectors are tested against each network's documented API shapes, not against the live networks.** `npm run verify` exercises Mastodon, Bluesky, Discord, Telegram, Slack and the webhook against local stand-ins, and the sign-in of X, LinkedIn, Facebook Pages, Instagram, YouTube and Pinterest against stand-ins that behave as those networks document; the rest are covered by request-shape tests. No sign-in has been run against a live network from this repository. Try a new account with one post before scheduling many.
 - **Threads work on 11 networks.** X, Bluesky, Mastodon, Threads, Telegram, Reddit, Lemmy and Nostr publish each part as a reply to the one before. Facebook Pages, Instagram and LinkedIn publish each part as a comment under the post. Some need an extra permission: `pages_manage_engagement` on Facebook, `instagram_manage_comments` on Instagram and `threads_manage_replies` on Threads. Discord, Slack, TikTok, YouTube, Pinterest, DEV and the webhook cannot take a thread. `npm run verify` proves threads against the Mastodon, Bluesky and Telegram stand-ins; the other eight are covered by request-shape tests.
 - **Repeating posts count their dates from the first occurrence.** A monthly post set for the 31st goes out on the last day of shorter months and returns to the 31st. With a time zone the post keeps its local clock time when the clocks change; without one the dates are counted in UTC. Occurrences missed while Broadside was not running are skipped, so the next one is always in the future.
 - **Instagram, Threads, Slack, DEV, Nostr and TikTok photos fetch media from a public URL.** Set `BROADSIDE_PUBLIC_URL` to where this app is reachable from the internet, or attach media by URL.
 - **TikTok and Pinterest restrict unapproved apps:** TikTok posts are private or inbox drafts until the app is audited; Pinterest trial-access pins are visible only to you.
-- **LinkedIn tokens last 60 days** and are pasted by hand, so that account needs reconnecting every two months. Threads tokens are refreshed each time Broadside posts.
+- **LinkedIn signs you in for 60 days.** Unless LinkedIn has approved your app for refresh tokens, that account needs reconnecting every two months, and Broadside marks it when the time is up. Threads tokens are refreshed each time Broadside posts.
+- **A sign-in that is renewed by posting lapses if nothing is posted.** X after about six months, Pinterest after 60 days. Reconnect the account when that happens.
 - **Not supported yet:** video on X, LinkedIn and Facebook; media on the later parts of a thread; stories; analytics; editing or deleting a post after it is published.
 
 ## Configuration
@@ -133,6 +154,8 @@ Uploads are checked by their bytes, not their name, and only real images and vid
 
 Outbound requests to addresses you type (media to import, a Mastodon instance, a webhook) are refused if they point at this machine or a private network, including after a redirect. Opt in with `BROADSIDE_ALLOW_PRIVATE_FETCH=1` for local targets.
 
+Signing in with a network starts from the app or from an API key, never from another site. A pending sign-in is one encrypted row that works once and is gone after ten minutes, and the callback connects nothing for a state value this Broadside did not issue. Where the network supports PKCE (X, TikTok) it is used. The app's secret is sent to the network in a request body or a Basic header, never in an address. Only what posting needs is kept afterwards: for Facebook, Instagram and Threads that is one token, and the app's secret is discarded. A choice of Pages or boards waits in a second row of the same kind, and the browser is shown names, never tokens.
+
 Agents see text that other people control: account names, error messages from networks, links. The MCP server tells agents to treat those as data. If you would rather an agent could never publish on its own, set `BROADSIDE_MCP_DRAFTS_ONLY=1`.
 
 Known limits:
@@ -149,6 +172,7 @@ To put Broadside on the internet, keep it on `127.0.0.1` and publish it through 
 
 - `src/lib/platforms/` holds one connector per network: its credential fields, limits and the HTTP calls that publish. Connectors never touch the database, so each is tested with a fake `fetch`.
 - `src/lib/posts.ts` is the engine: validate, fan out, record a status per target, retry transient failures. A target is claimed with a compare-and-set before it is sent, so two clocks can never post it twice, and a target interrupted mid-send is failed rather than resent. A thread is recorded part by part, so a retry continues where it stopped, and the next occurrence of a repeating post is created under the same kind of claim, exactly once.
+- `src/lib/oauth.ts` is the sign-in every network shares. Each connector describes its own network in an `oauth` block: where to approve, the scopes, the style of PKCE, how the code is exchanged and what is stored. `src/lib/platforms/oauth2.ts` renews tokens before a post and hands rotated ones back to be saved.
 - `src/lib/mcp.ts` defines the tools once; `/mcp` (HTTP) and `bin/broadside-mcp.ts` (stdio) both serve them.
 - `src/lib/scheduler.ts` is an in-process clock started with the server.
 

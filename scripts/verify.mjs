@@ -10,7 +10,7 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -124,10 +124,120 @@ function networks() {
         received.webhook.push({ body: parsed(), signature: req.headers["x-broadside-signature"] });
         return json({ id: "ext-9", url: "https://example.com/p/9" });
       }
+      // The networks that sign in. They live at fixed addresses, so scripts/standin-fetch.mjs sends them here as /<host>/<path>.
+      const signedIn = signInNetworks(req, url, new URLSearchParams(text), parsed);
+      if (signedIn) return json(signedIn.body, signedIn.status ?? 200);
       json({ error: `unexpected ${req.method} ${url}` }, 404);
     });
   });
   return new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(server)));
+}
+
+/* Stand-ins for the networks that sign in ---------------------------------- */
+
+const APP = {
+  x: { client_id: "verify-x-client-id", client_secret: "verify-x-client-secret-51ab" },
+  linkedin: { client_id: "verify-li-client-id", client_secret: "verify-li-client-secret-77c0" },
+  facebook: { app_id: "verify-fb-app-id", app_secret: "verify-fb-app-secret-3d9e" },
+  instagram: { app_id: "verify-ig-app-id", app_secret: "verify-ig-app-secret-8a2f" },
+  youtube: { client_id: "verify-yt-client-id", client_secret: "verify-yt-client-secret-c41d" },
+  pinterest: { app_id: "verify-pin-app-id", app_secret: "verify-pin-app-secret-e06b" },
+  threads: { app_id: "verify-th-app-id", app_secret: "verify-th-app-secret-b915" },
+};
+const PAGE_TOKENS = { 111: "verify-page-token-111-6c2a", 222: "verify-page-token-222-f0d4" };
+// Tokens that work once, as X's and Pinterest's refresh tokens do. Each lives 60 seconds, so Broadside must renew before every use.
+const rotating = { x: { n: 0, access: null, refresh: null, spent: [] }, pinterest: { n: 0, access: null, refresh: null, spent: [] } };
+const signIns = { tokenRequests: [], tweets: [], feed: [], pins: [], queriesOnTokenEndpoints: [] };
+
+function signInNetworks(req, url, form, parsed) {
+  const { pathname, search, searchParams } = new URL(url, "http://standin");
+  const auth = req.headers.authorization ?? "";
+  const basic = (app) => `Basic ${Buffer.from(`${Object.values(app)[0]}:${Object.values(app)[1]}`).toString("base64")}`;
+  const grant = form.get("grant_type");
+  const token = (name, fields) => {
+    signIns.tokenRequests.push({ name, auth, ...Object.fromEntries(form) });
+    if (search) signIns.queriesOnTokenEndpoints.push(url);
+    return fields;
+  };
+  const rotate = (name, prefix) => {
+    const kept = rotating[name];
+    if (grant === "authorization_code" && form.get("code") !== "good-code") return { status: 400, body: { error: "invalid_request", error_description: "Value passed for the authorization code was invalid." } };
+    if (grant === "refresh_token" && form.get("refresh_token") !== kept.refresh) return { status: 400, body: { error: "invalid_request", error_description: "Value passed for the token was invalid." } };
+    if (grant === "refresh_token") kept.spent.push(kept.refresh);
+    kept.n++;
+    kept.access = `${prefix}-access-${kept.n}`;
+    kept.refresh = `${prefix}-refresh-${kept.n}`;
+    return { body: { token_type: "bearer", expires_in: 60, access_token: kept.access, refresh_token: kept.refresh } };
+  };
+
+  // X: a Basic header, two-hour tokens, single-use refresh tokens.
+  if (pathname === "/api.x.com/2/oauth2/token") {
+    token("x");
+    if (auth !== basic(APP.x)) return { status: 401, body: { error: "unauthorized_client", error_description: "Missing valid authorization header" } };
+    return rotate("x", "verify-x");
+  }
+  if (pathname.startsWith("/api.x.com/2/")) {
+    if (auth !== `Bearer ${rotating.x.access}`) return { status: 401, body: { title: "Unauthorized", detail: "Unauthorized", status: 401 } };
+    if (pathname.endsWith("/users/me")) return { body: { data: { username: "verify_x" } } };
+    signIns.tweets.push(parsed());
+    return { body: { data: { id: String(9000 + signIns.tweets.length) } } };
+  }
+  // LinkedIn: id and secret in the body, a 60-day token and no refresh token.
+  if (pathname === "/www.linkedin.com/oauth/v2/accessToken") {
+    token("linkedin");
+    if (form.get("client_secret") !== APP.linkedin.client_secret || form.get("code") !== "good-code") return { status: 401, body: { error: "invalid_request", error_description: "Unable to retrieve access token: authorization code not found" } };
+    return { body: { access_token: "verify-li-access-2b7e", expires_in: 5184000, scope: "openid,profile,w_member_social" } };
+  }
+  if (pathname === "/api.linkedin.com/v2/userinfo") return auth === "Bearer verify-li-access-2b7e" ? { body: { sub: "li-member-1", name: "Verify Member" } } : { status: 401, body: { message: "Invalid access token" } };
+  // Google: id and secret in the body, an hour-long token and a refresh token that stays.
+  if (pathname === "/oauth2.googleapis.com/token") {
+    token("youtube");
+    if (form.get("client_secret") !== APP.youtube.client_secret) return { status: 401, body: { error: "invalid_client", error_description: "Unauthorized" } };
+    if (grant === "authorization_code") return form.get("code") === "good-code" ? { body: { access_token: "verify-yt-access-1", expires_in: 3599, refresh_token: "verify-yt-refresh-90aa", token_type: "Bearer" } } : { status: 400, body: { error: "invalid_grant", error_description: "Malformed auth code." } };
+    return { body: { access_token: "verify-yt-access-2", expires_in: 3599, token_type: "Bearer" } };
+  }
+  if (pathname === "/www.googleapis.com/youtube/v3/channels") return { body: { items: [{ snippet: { title: "Verify Channel" } }] } };
+  // Facebook Login, for Pages and for Instagram: the code, then the long-lived trade, both read from the body.
+  if (pathname === "/graph.facebook.com/v27.0/oauth/access_token") {
+    token("facebook");
+    const app = form.get("client_id") === APP.instagram.app_id ? APP.instagram : APP.facebook;
+    if (form.get("client_secret") !== app.app_secret) return { status: 400, body: { error: { message: "Error validating client secret.", type: "OAuthException", code: 1 } } };
+    if (grant === "fb_exchange_token") return form.get("fb_exchange_token") === "verify-fb-user-short" ? { body: { access_token: "verify-fb-user-long-4e1c", token_type: "bearer", expires_in: 5183944 } } : { status: 400, body: { error: { message: "Invalid OAuth access token.", type: "OAuthException", code: 190 } } };
+    if (form.get("code") !== "good-code") return { status: 400, body: { error: { message: "This authorization code has been used.", type: "OAuthException", code: 100 } } };
+    return { body: { access_token: "verify-fb-user-short", token_type: "bearer", expires_in: 5400 } };
+  }
+  if (pathname === "/graph.facebook.com/v27.0/me/accounts") {
+    if (searchParams.get("access_token") !== "verify-fb-user-long-4e1c") return { status: 400, body: { error: { message: "Invalid OAuth access token.", type: "OAuthException", code: 190 } } };
+    return { body: { data: [{ id: "111", name: "Verify Press", access_token: PAGE_TOKENS[111], tasks: ["CREATE_CONTENT"] }, { id: "222", name: "Verify Bindery", access_token: PAGE_TOKENS[222], tasks: ["CREATE_CONTENT"] }] } };
+  }
+  const graph = pathname.match(/^\/graph\.facebook\.com\/(?:v27\.0\/)?(\w+)(\/feed)?$/);
+  if (graph) {
+    const [, id, feed] = graph;
+    if (feed) {
+      signIns.feed.push({ page: id, ...Object.fromEntries(form) });
+      return form.get("access_token") === PAGE_TOKENS[id] ? { body: { id: `${id}_1`, permalink_url: `https://www.facebook.com/${id}/posts/1` } } : { status: 400, body: { error: { message: "Invalid OAuth access token.", type: "OAuthException", code: 190 } } };
+    }
+    // Only the first Page has an Instagram account behind it.
+    if (searchParams.get("fields")?.startsWith("instagram_business_account")) return { body: id === "111" ? { instagram_business_account: { id: "17841400000000111", username: "verify_gram" }, id } : { id } };
+    if (id === "17841400000000111") return { body: { username: "verify_gram" } };
+    return { body: { name: id === "111" ? "Verify Press" : "Verify Bindery" } };
+  }
+  // Pinterest: a Basic header, 30-day tokens and a refresh token that is replaced each time.
+  if (pathname === "/api.pinterest.com/v5/oauth/token") {
+    token("pinterest");
+    if (auth !== basic(APP.pinterest)) return { status: 401, body: { code: 2, message: "Authentication failed." } };
+    return rotate("pinterest", "verify-pin");
+  }
+  if (pathname.startsWith("/api.pinterest.com/v5/")) {
+    if (auth !== `Bearer ${rotating.pinterest.access}`) return { status: 401, body: { code: 2, message: "Authentication failed." } };
+    if (pathname.endsWith("/boards")) return { body: { items: [{ id: "board-1", name: "Verify Specimens", privacy: "PUBLIC" }, { id: "board-2", name: "Verify Drafts", privacy: "SECRET" }], bookmark: null } };
+    if (pathname.endsWith("/user_account")) return { body: { username: "verify_pins" } };
+    signIns.pins.push(parsed());
+    return { body: { id: `pin-${signIns.pins.length}` } };
+  }
+  // Threads, reached only by pasting a token here: its sign-in needs an https address.
+  if (pathname === "/graph.threads.net/v1.0/me") return { body: { id: "th-1", username: "verify_threads" } };
+  return null;
 }
 
 /* Helpers ------------------------------------------------------------------ */
@@ -184,6 +294,9 @@ try {
     BROADSIDE_ALLOW_ANY_WEBHOOK: "1",
     BROADSIDE_PUBLIC_URL: "",
     BROADSIDE_PASSWORD: "",
+    // Requests for the networks that sign in are sent to the stand-in by a file loaded into the server under test. Nothing in src reads this.
+    BROADSIDE_VERIFY_STANDIN: net,
+    NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --import=${pathToFileURL(path.join(root, "scripts", "standin-fetch.mjs")).href}`.trim(),
   };
   app = spawn("npx", ["next", "start", "-p", String(port), "-H", "127.0.0.1"], { cwd: root, env, stdio: ["ignore", "pipe", "pipe"] });
   let log = "";
@@ -481,6 +594,127 @@ try {
   ok(forged.status === 303 && (new URL(forged.headers.get("location")).searchParams.get("error") ?? "").includes("not started here"), "A callback with a state this Broadside never issued connects nothing");
   const tiktokSpec = platforms.find((p) => p.id === "tiktok");
   ok(tiktokSpec.oauth?.callback_path === "/oauth/tiktok/callback" && !tiktokSpec.fields.some((f) => f.key === "refresh_token"), "The TikTok connect form asks for the app's key and secret only");
+
+  // Signing in with the other networks, against stand-ins for each: the browser's two hops are played by this script.
+  const viaHost = (pathname, host) =>
+    new Promise((resolve, reject) => {
+      const req = httpRequest({ host: "127.0.0.1", port, path: pathname, method: "GET", headers: { host } }, (res) => {
+        res.resume();
+        res.on("end", () => resolve({ status: res.statusCode, location: res.headers.location ?? "" }));
+      });
+      req.on("error", reject);
+      req.end();
+    });
+  const signIn = async (platform, code = "good-code") => {
+    const started = await api(`/api/v1/oauth/${platform}/start`, { method: "POST", headers: auth, body: JSON.stringify({ credentials: APP[platform] }) });
+    const address = new URL(started.body.data.url);
+    const redirect = new URL(address.searchParams.get("redirect_uri"));
+    // The network sends the browser to the redirect address, under whichever name for this machine that address uses.
+    const landed = await viaHost(`${redirect.pathname}?code=${code}&state=${encodeURIComponent(address.searchParams.get("state"))}`, redirect.host);
+    return { address, redirect, landed, back: landed.location ? new URL(landed.location) : null, url: started.body.data.url };
+  };
+  const signInSpecs = Object.fromEntries(platforms.map((p) => [p.id, p.oauth]));
+  const seven = ["x", "linkedin", "threads", "facebook", "instagram", "youtube", "pinterest"];
+  ok(
+    seven.every((id) => signInSpecs[id]?.callback_path === `/oauth/${id}/callback` && signInSpecs[id].scopes.length > 0 && signInSpecs[id].paste.length > 0),
+    "list_platforms gives each of the seven its redirect path, the scopes it asks for and the fields to paste instead",
+  );
+  for (const id of seven) {
+    const forgedCallback = await fetch(`${base}/oauth/${id}/callback?code=x&state=made-up`, { redirect: "manual" });
+    ok(forgedCallback.status === 303 && (new URL(forgedCallback.headers.get("location")).searchParams.get("error") ?? "").includes("not started here"), `A ${id} callback with a state this Broadside never issued connects nothing`);
+  }
+  const foreignStart = await fetch(`${base}/api/v1/oauth/x/start`, { method: "POST", headers: { "content-type": "application/json", "sec-fetch-site": "cross-site" }, body: JSON.stringify({ credentials: APP.x }) });
+  const noKeyChoice = await fetch(`${base}/api/v1/oauth/choices/anything`, { method: "POST", headers: { "content-type": "application/json", "sec-fetch-site": "cross-site" }, body: JSON.stringify({ choices: ["111"] }) });
+  ok(foreignStart.status === 401 && noKeyChoice.status === 401, "Another site cannot start a sign-in or make a choice: both need a key or the app's own session");
+  const accountsBefore = (await api("/api/v1/accounts", { headers: auth })).body.data.length;
+
+  // X: PKCE, a Basic header, and refresh tokens that work once
+  const xIn = await signIn("x");
+  ok(
+    xIn.address.origin + xIn.address.pathname === "https://x.com/i/oauth2/authorize" && xIn.redirect.href === `http://127.0.0.1:${port}/oauth/x/callback` && /^[\w-]{43}$/.test(xIn.address.searchParams.get("code_challenge")) && xIn.address.searchParams.get("scope") === "tweet.read tweet.write users.read media.write offline.access" && !xIn.url.includes(APP.x.client_secret),
+    "Continue with X sends the browser to X with PKCE, the posting scopes and a 127.0.0.1 redirect address, and no secret in the URL",
+  );
+  ok(xIn.landed.status === 303 && xIn.back.pathname === "/app/accounts" && xIn.back.searchParams.get("connected") === "@verify_x", "X: the callback exchanges the code and lands back on Accounts, connected", xIn.landed.location);
+  const xExchange = signIns.tokenRequests.find((r) => r.name === "x" && r.grant_type === "authorization_code");
+  ok(xExchange.code === "good-code" && xExchange.redirect_uri === xIn.redirect.href && /^[\w.~-]{64}$/.test(xExchange.code_verifier) && !("client_secret" in xExchange), "X: the code is exchanged with its verifier, and the secret travels in the Basic header only");
+  const replayed = await viaHost(`${xIn.redirect.pathname}?code=good-code&state=${encodeURIComponent(xIn.address.searchParams.get("state"))}`, xIn.redirect.host);
+  ok((new URL(replayed.location).searchParams.get("error") ?? "").includes("already used"), "X: the same state does not work a second time");
+  const xAccount = (await api("/api/v1/accounts", { headers: auth })).body.data.find((a) => a.platform === "x");
+  const tweetOne = await api("/api/v1/posts", { method: "POST", headers: auth, body: JSON.stringify({ content: "verify: signed in to X", thread: ["verify: and a reply"], targets: [{ account_id: xAccount.id }] }) });
+  const tweetTwo = await api("/api/v1/posts", { method: "POST", headers: auth, body: JSON.stringify({ content: "verify: X again", targets: [{ account_id: xAccount.id }] }) });
+  ok(
+    tweetOne.body.data.status === "published" && tweetTwo.body.data.status === "published" && signIns.tweets.length === 3 && signIns.tweets[1].reply.in_reply_to_tweet_id === "9001",
+    "X: posts and a reply go out with tokens renewed before each use",
+    JSON.stringify([tweetOne.body.data?.targets, tweetTwo.body.data?.targets]),
+  );
+  ok(rotating.x.spent.length >= 3 && new Set(rotating.x.spent).size === rotating.x.spent.length, `X: each refresh token was spent once (${rotating.x.spent.length} renewals), so the rotated one was stored every time`);
+  const xRefused = await signIn("x", "stale-code");
+  ok((xRefused.back.searchParams.get("error") ?? "").includes("Value passed for the authorization code was invalid"), "X: a refused code comes back with X's own reason", xRefused.landed.location);
+
+  // LinkedIn and YouTube: no choice to make
+  const liIn = await signIn("linkedin");
+  ok(liIn.address.host === "www.linkedin.com" && liIn.address.searchParams.get("scope") === "openid profile w_member_social" && liIn.back.searchParams.get("connected") === "Verify Member" && !liIn.url.includes(APP.linkedin.client_secret), "Continue with LinkedIn connects the member who approved", liIn.landed.location);
+  const ytIn = await signIn("youtube");
+  ok(ytIn.address.host === "accounts.google.com" && ytIn.address.searchParams.get("access_type") === "offline" && ytIn.back.searchParams.get("connected") === "Verify Channel" && !ytIn.url.includes(APP.youtube.client_secret), "Continue with YouTube asks Google for offline access and connects the signed-in account's channel", ytIn.landed.location);
+
+  // Facebook Pages: sign in, then choose
+  const fbIn = await signIn("facebook");
+  const fbChoice = fbIn.back.searchParams.get("choose");
+  ok(
+    fbIn.address.host === "www.facebook.com" && fbIn.redirect.href === `http://localhost:${port}/oauth/facebook/callback` && fbIn.back.origin === base && Boolean(fbChoice) && !fbIn.back.searchParams.get("connected"),
+    "Continue with Facebook uses localhost for the redirect, then returns to where it started with a choice to make",
+    fbIn.landed.location,
+  );
+  ok(signIns.tokenRequests.filter((r) => r.name === "facebook").map((r) => r.grant_type).join(",") === "authorization_code,fb_exchange_token" && signIns.queriesOnTokenEndpoints.length === 0, "Facebook: the code is exchanged and then traded for a long-lived token, with nothing in the address of either request");
+  const choosePage = await fetch(`${base}${fbIn.back.pathname}${fbIn.back.search}`).then((r) => r.text());
+  ok(choosePage.includes("Verify Press") && choosePage.includes("Verify Bindery") && choosePage.includes("Pick the Pages to connect") && !choosePage.includes(PAGE_TOKENS[111]) && !choosePage.includes("verify-fb-user-long-4e1c"), "The Accounts page lists the Pages to choose from, and none of their tokens");
+  const offered = await api(`/api/v1/oauth/choices/${fbChoice}`, { headers: auth });
+  ok(offered.body.data.multiple === true && offered.body.data.choices.length === 2 && !JSON.stringify(offered.body).includes("verify-page-token"), "The API offers the same choice by name only");
+  const pickedPages = await api(`/api/v1/oauth/choices/${fbChoice}`, { method: "POST", headers: ui, body: JSON.stringify({ choices: ["111", "222"] }) });
+  ok(pickedPages.status === 200 && pickedPages.body.data.connected.map((a) => a.handle).join(",") === "Verify Press,Verify Bindery", "Picking two Pages connects two accounts", JSON.stringify(pickedPages.body));
+  const pickedAgain = await api(`/api/v1/oauth/choices/${fbChoice}`, { method: "POST", headers: ui, body: JSON.stringify({ choices: ["111"] }) });
+  ok(pickedAgain.status === 400 && /already made/.test(pickedAgain.body.error.message), "A choice is made once");
+  const pagePost = await api("/api/v1/posts", { method: "POST", headers: auth, body: JSON.stringify({ content: "verify: to a Page", targets: [{ account_id: pickedPages.body.data.connected[1].id }] }) });
+  ok(pagePost.body.data.status === "published" && signIns.feed.at(-1).page === "222" && signIns.feed.at(-1).access_token === PAGE_TOKENS[222], "Facebook: a post to the second Page goes out with that Page's own token");
+
+  // Instagram: the accounts behind the Pages
+  const igIn = await signIn("instagram");
+  const igOffered = await api(`/api/v1/oauth/choices/${igIn.back.searchParams.get("choose")}`, { headers: auth });
+  const igPicked = await api(`/api/v1/oauth/choices/${igIn.back.searchParams.get("choose")}`, { method: "POST", headers: ui, body: JSON.stringify({ choices: ["17841400000000111"] }) });
+  ok(igOffered.body.data.choices.length === 1 && igOffered.body.data.choices[0].name === "@verify_gram" && igPicked.body.data.connected[0].handle === "@verify_gram", "Continue with Instagram offers the Instagram account behind a Page and connects it", JSON.stringify([igOffered.body, igPicked.body]));
+
+  // Pinterest: sign in, choose a board, pin with a renewed token
+  const pinIn = await signIn("pinterest");
+  const pinChoice = pinIn.back.searchParams.get("choose");
+  const pinTwo = await api(`/api/v1/oauth/choices/${pinChoice}`, { method: "POST", headers: ui, body: JSON.stringify({ choices: ["board-1", "board-2"] }) });
+  const pinPicked = await api(`/api/v1/oauth/choices/${pinChoice}`, { method: "POST", headers: ui, body: JSON.stringify({ choices: ["board-2"] }) });
+  ok(
+    pinIn.address.host === "www.pinterest.com" && pinTwo.status === 400 && /one at a time/.test(pinTwo.body.error.message) && pinPicked.body.data.connected[0].handle === "@verify_pins, Verify Drafts",
+    "Continue with Pinterest lists the boards and connects the one picked",
+    JSON.stringify([pinTwo.body, pinPicked.body]),
+  );
+  const pinPost = await api("/api/v1/posts", { method: "POST", headers: auth, body: JSON.stringify({ content: "verify: a pin", media_ids: [media.id], targets: [{ account_id: pinPicked.body.data.connected[0].id }] }) });
+  ok(pinPost.body.data.status === "published" && signIns.pins.at(-1).board_id === "board-2" && rotating.pinterest.spent.length >= 2 && new Set(rotating.pinterest.spent).size === rotating.pinterest.spent.length, "Pinterest: the pin goes to the chosen board, and each rotated refresh token was stored", JSON.stringify(pinPost.body.data?.targets));
+
+  // Threads: no sign-in from an http address, and tokens can still be pasted
+  const thStart = await api("/api/v1/oauth/threads/start", { method: "POST", headers: auth, body: JSON.stringify({ credentials: APP.threads }) });
+  const thPasted = await api("/api/v1/accounts", { method: "POST", headers: auth, body: JSON.stringify({ platform: "threads", credentials: { access_token: "verify-threads-pasted-token-5f77" } }) });
+  ok(thStart.status === 400 && /only accepts an https redirect address/.test(thStart.body.error.message) && thPasted.body.data?.handle === "@verify_threads", "Threads refuses to start a sign-in from an http address and says why, and a pasted token still connects", JSON.stringify([thStart.body, thPasted.body]));
+
+  // Nothing above leaked a secret, and the dialog says what to register
+  const afterSignIns = await api("/api/v1/accounts", { headers: auth });
+  const everySecret = [...Object.values(APP).map((app) => Object.values(app)[1]), ...Object.values(PAGE_TOKENS), "verify-fb-user-long-4e1c", "verify-li-access-2b7e", "verify-yt-refresh-90aa", "verify-threads-pasted-token-5f77", rotating.x.refresh, rotating.pinterest.refresh];
+  ok(afterSignIns.body.data.length === accountsBefore + 8 && everySecret.every((secret) => !JSON.stringify(afterSignIns.body).includes(secret)), "Eight accounts were connected by signing in or pasting, and the account list holds none of their secrets");
+  const xDialog = await fetch(`${base}/app/accounts?connect=x`).then((r) => r.text());
+  ok(xDialog.includes("Continue with X") && xDialog.includes("Paste tokens instead") && xDialog.includes("Permissions it will ask for") && xDialog.includes("offline.access") && xDialog.includes("Redirect address to add in your"), "The X connect dialog shows the redirect address to register, the scopes, and a way to paste tokens instead");
+  const xLink = result(await (async () => {
+    const again = new Client({ name: "verify-link", version: "1.0.0" });
+    await again.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp`), { requestInit: { headers: { authorization: `Bearer ${token}` } } }));
+    const reply = await again.callTool({ name: "connect_account", arguments: { platform: "x" } });
+    await again.close();
+    return reply;
+  })());
+  ok(xLink.connect_url === `${base}/app/accounts?connect=x` && xLink.signs_in === true && xLink.needs.join(",") === "Client ID,Client Secret" && !("credentials" in xLink), "connect_account still hands an agent a link, and names only what the form will ask for");
 
   // Editing a saved post in the app
   const toEdit = await api("/api/v1/posts", { method: "POST", headers: auth, body: JSON.stringify({ content: "editable in the app", targets: [{ account_id: ids.sandbox }, { account_id: ids.mastodon, content_override: "mastodon wording" }], publish_at: new Date(Date.now() + 3600000).toISOString() }) });
