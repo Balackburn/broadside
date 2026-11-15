@@ -49,6 +49,11 @@ const received = { mastodon: [], bluesky: [], discord: [], telegram: [], webhook
 // Texts the stand-in Mastodon turns away the first time it sees them, so a thread can fail part of the way and be retried.
 const rejectedOnce = new Set();
 received.telegramReplies = [];
+// Analytics: every read of a post's numbers the stand-ins were asked for, the counts they answer with, and the posts they refuse to report on.
+const numberReads = { mastodon: [], bluesky: [], discord: [], x: [], facebook: [], pinterest: [] };
+const standinCounts = { mastodon: {}, bluesky: { likeCount: 7, repostCount: 3, replyCount: 1, quoteCount: 0 } };
+const MASTODON_COUNTS = { replies_count: 1, reblogs_count: 2, favourites_count: 4 };
+const numbersDown = new Set();
 
 function networks() {
   const server = createServer((req, res) => {
@@ -76,6 +81,15 @@ function networks() {
       // Mastodon
       if (url === "/api/v1/accounts/verify_credentials") return json({ acct: "tester", avatar: null });
       if (url === "/api/v2/media") return json({ id: "media-1" });
+      const statusRead = req.method === "GET" && url.match(/^\/api\/v1\/statuses\/(\w+)$/);
+      if (statusRead) {
+        // A read of one status, as GET /api/v1/statuses/:id answers it: the status with its counts.
+        numberReads.mastodon.push({ id: statusRead[1], auth: req.headers.authorization ?? null });
+        if (numbersDown.has(statusRead[1])) return json({ error: "The stand-in is not reporting on this status" }, 503);
+        const known = received.mastodon.find((status) => status.id === statusRead[1]);
+        if (!known) return json({ error: "Record not found" }, 404);
+        return json({ id: known.id, content: known.status, visibility: "public", ...MASTODON_COUNTS, ...standinCounts.mastodon[known.id] });
+      }
       if (url === "/api/v1/statuses") {
         const status = parsed();
         if (status.status?.includes("[reject once]") && !rejectedOnce.has(status.status)) {
@@ -90,6 +104,12 @@ function networks() {
       // Bluesky
       if (url === "/xrpc/com.atproto.server.createSession") return json({ accessJwt: "jwt", did: "did:plc:test", handle: "tester.test" });
       if (url.startsWith("/xrpc/app.bsky.actor.getProfile")) return json({});
+      if (url.startsWith("/xrpc/app.bsky.feed.getPosts")) {
+        // The post views for the addresses asked for, each with its counts.
+        const uris = new URL(url, "http://standin").searchParams.getAll("uris");
+        numberReads.bluesky.push({ uris, auth: req.headers.authorization ?? null });
+        return json({ posts: received.bluesky.filter((post) => uris.includes(post.uri)).map((post) => ({ uri: post.uri, cid: post.cid, author: { did: "did:plc:test", handle: "tester.test" }, record: { text: post.text }, ...standinCounts.bluesky, indexedAt: new Date().toISOString() })) });
+      }
       if (url === "/xrpc/com.atproto.repo.uploadBlob") return json({ blob: { $type: "blob", ref: { $link: "bafy" }, mimeType: "image/png", size: raw.length } });
       if (url === "/xrpc/com.atproto.repo.createRecord") {
         // Each record gets its own uri and cid; a reply must quote both for its root and its parent.
@@ -103,6 +123,11 @@ function networks() {
       if (url === "/api/webhooks/1/token?wait=true") {
         received.discord.push(text);
         return json({ id: "m1", channel_id: "c1" });
+      }
+      if (req.method === "GET" && url.startsWith("/api/webhooks/1/token/messages/")) {
+        // A webhook reading back its own message: two reactions of one emoji and one of another.
+        numberReads.discord.push(url.split("/").pop());
+        return json({ id: url.split("/").pop(), channel_id: "c1", content: "", reactions: [{ count: 2, emoji: { id: null, name: "🔥" } }, { count: 1, emoji: { id: null, name: "👍" } }] });
       }
       // Telegram
       if (url.endsWith("/getMe")) return json({ ok: true, result: { id: 1 } });
@@ -146,7 +171,8 @@ const APP = {
 };
 const PAGE_TOKENS = { 111: "verify-page-token-111-6c2a", 222: "verify-page-token-222-f0d4" };
 // Tokens that work once, as X's and Pinterest's refresh tokens do. Each lives 60 seconds, so Broadside must renew before every use.
-const rotating = { x: { n: 0, access: null, refresh: null, spent: [] }, pinterest: { n: 0, access: null, refresh: null, spent: [] } };
+// An access token stays good after a newer one is issued, as it does on the real networks until it expires: the refresh token is the one that works once.
+const rotating = { x: { n: 0, access: null, refresh: null, spent: [], issued: new Set() }, pinterest: { n: 0, access: null, refresh: null, spent: [], issued: new Set() } };
 const signIns = { tokenRequests: [], tweets: [], feed: [], pins: [], queriesOnTokenEndpoints: [] };
 
 function signInNetworks(req, url, form, parsed) {
@@ -167,6 +193,7 @@ function signInNetworks(req, url, form, parsed) {
     kept.n++;
     kept.access = `${prefix}-access-${kept.n}`;
     kept.refresh = `${prefix}-refresh-${kept.n}`;
+    kept.issued.add(`Bearer ${kept.access}`);
     return { body: { token_type: "bearer", expires_in: 60, access_token: kept.access, refresh_token: kept.refresh } };
   };
 
@@ -177,8 +204,14 @@ function signInNetworks(req, url, form, parsed) {
     return rotate("x", "verify-x");
   }
   if (pathname.startsWith("/api.x.com/2/")) {
-    if (auth !== `Bearer ${rotating.x.access}`) return { status: 401, body: { title: "Unauthorized", detail: "Unauthorized", status: 401 } };
+    if (!rotating.x.issued.has(auth)) return { status: 401, body: { title: "Unauthorized", detail: "Unauthorized", status: 401 } };
     if (pathname.endsWith("/users/me")) return { body: { data: { username: "verify_x" } } };
+    const tweetRead = req.method === "GET" && pathname.match(/\/2\/tweets\/(\d+)$/);
+    if (tweetRead) {
+      // A read of one post's public_metrics. It is not a tweet, so it is counted apart from them.
+      numberReads.x.push({ id: tweetRead[1], fields: searchParams.get("tweet.fields") });
+      return { body: { data: { id: tweetRead[1], text: "", edit_history_tweet_ids: [tweetRead[1]], public_metrics: { retweet_count: 1, reply_count: 1, like_count: 9, quote_count: 0, bookmark_count: 2, impression_count: 120 } } } };
+    }
     signIns.tweets.push(parsed());
     return { body: { data: { id: String(9000 + signIns.tweets.length) } } };
   }
@@ -210,6 +243,15 @@ function signInNetworks(req, url, form, parsed) {
     if (searchParams.get("access_token") !== "verify-fb-user-long-4e1c") return { status: 400, body: { error: { message: "Invalid OAuth access token.", type: "OAuthException", code: 190 } } };
     return { body: { data: [{ id: "111", name: "Verify Press", access_token: PAGE_TOKENS[111], tasks: ["CREATE_CONTENT"] }, { id: "222", name: "Verify Bindery", access_token: PAGE_TOKENS[222], tasks: ["CREATE_CONTENT"] }] } };
   }
+  // A Page post's numbers: its reaction, comment and share totals, then its insights.
+  const pagePost = req.method === "GET" && pathname.match(/^\/graph\.facebook\.com\/(\d+)_(\d+)(\/insights)?$/);
+  if (pagePost) {
+    const [, pageId, , insights] = pagePost;
+    if (searchParams.get("access_token") !== PAGE_TOKENS[pageId]) return { status: 400, body: { error: { message: "Invalid OAuth access token.", type: "OAuthException", code: 190 } } };
+    numberReads.facebook.push({ page: pageId, insights: Boolean(insights), asked: searchParams.get(insights ? "metric" : "fields") });
+    if (insights) return { body: { data: [{ name: "post_media_view", period: "lifetime", values: [{ value: 64 }] }, { name: "post_clicks", period: "lifetime", values: [{ value: 3 }] }] } };
+    return { body: { id: `${pageId}_1`, shares: { count: 1 }, reactions: { data: [], summary: { total_count: 5 } }, comments: { data: [], summary: { order: "chronological", total_count: 0 } } } };
+  }
   const graph = pathname.match(/^\/graph\.facebook\.com\/(?:v27\.0\/)?(\w+)(\/feed)?$/);
   if (graph) {
     const [, id, feed] = graph;
@@ -229,7 +271,13 @@ function signInNetworks(req, url, form, parsed) {
     return rotate("pinterest", "verify-pin");
   }
   if (pathname.startsWith("/api.pinterest.com/v5/")) {
-    if (auth !== `Bearer ${rotating.pinterest.access}`) return { status: 401, body: { code: 2, message: "Authentication failed." } };
+    if (!rotating.pinterest.issued.has(auth)) return { status: 401, body: { code: 2, message: "Authentication failed." } };
+    const pinRead = req.method === "GET" && pathname.match(/\/v5\/pins\/([\w-]+)\/analytics$/);
+    if (pinRead) {
+      // A pin's analytics over a range of days, summed in summary_metrics.
+      numberReads.pinterest.push({ id: pinRead[1], start: searchParams.get("start_date"), end: searchParams.get("end_date"), metrics: searchParams.get("metric_types") });
+      return { body: { all: { lifetime_metrics: {}, daily_metrics: [], summary_metrics: { IMPRESSION: 30, OUTBOUND_CLICK: 1, PIN_CLICK: 4, SAVE: 2 } } } };
+    }
     if (pathname.endsWith("/boards")) return { body: { items: [{ id: "board-1", name: "Verify Specimens", privacy: "PUBLIC" }, { id: "board-2", name: "Verify Drafts", privacy: "SECRET" }], bookmark: null } };
     if (pathname.endsWith("/user_account")) return { body: { username: "verify_pins" } };
     signIns.pins.push(parsed());
@@ -314,6 +362,13 @@ try {
     return { status: response.status, body: await response.json() };
   };
 
+  // Analytics with nothing published: the screen says what will appear and shows no figure at all
+  const emptyAnalytics = await fetch(`${base}/app/analytics`).then((r) => r.text());
+  ok(
+    emptyAnalytics.includes("Nothing published yet.") && emptyAnalytics.includes("Once a post goes out, the numbers each network reports for it appear here") && emptyAnalytics.includes("Write a post") && /href="\/app"/.test(emptyAnalytics) && !emptyAnalytics.includes("Totals"),
+    "With nothing published, the analytics page says what will appear and links to Compose, with no figures",
+  );
+
   // Access control
   ok((await api("/api/v1/accounts")).status === 401, "The API refuses a request with no key");
   const unauthorized = await fetch(`${base}/mcp`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
@@ -348,7 +403,7 @@ try {
   await client.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp`), { requestInit: { headers: { authorization: `Bearer ${token}` } } }));
   ok(client.getServerVersion().name === "broadside", "An MCP client completes the handshake over HTTP");
   const tools = (await client.listTools()).tools.map((t) => t.name).sort();
-  const expected = ["cancel_post", "check_post", "connect_account", "create_post", "delete_post", "disconnect_account", "get_post", "list_accounts", "list_groups", "list_media", "list_platforms", "list_posts", "list_signatures", "list_tags", "publish_post", "retry_target", "stop_series", "update_post", "upload_media"];
+  const expected = ["cancel_post", "check_post", "connect_account", "create_post", "delete_post", "disconnect_account", "get_analytics", "get_post", "get_post_analytics", "list_accounts", "list_groups", "list_media", "list_platforms", "list_posts", "list_signatures", "list_tags", "publish_post", "retry_target", "stop_series", "update_post", "upload_media"];
   ok(expected.every((name) => tools.includes(name)), `The server offers its ${expected.length} tools`, `got ${tools.join(", ")}`);
   const call = async (name, args = {}) => client.callTool({ name, arguments: args });
 
@@ -577,6 +632,7 @@ try {
     ["/app", "Compose"],
     ["/app/posts", "Posts"],
     ["/app/calendar", "Calendar"],
+    ["/app/analytics", "Analytics"],
     ["/app/media", "Media library"],
     ["/app/accounts", "Accounts"],
     ["/app/connect", "/mcp"],
@@ -959,6 +1015,157 @@ try {
   notMedia.set("file", new Blob(["<script>alert(1)</script>"], { type: "text/html" }), "page.html");
   const rejected = await fetch(`${base}/api/v1/media`, { method: "POST", headers: { authorization: `Bearer ${token}` }, body: notMedia });
   ok(rejected.status === 400, "An HTML file is refused as an upload");
+
+  // Analytics: numbers read back from the networks, stored with their time, and never invented
+  const numbersOf = async (postId) => (await via("GET", `/posts/${postId}/analytics`)).body.data;
+  const on = (data, platform) => data.targets.find((t) => t.platform === platform);
+  const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  const metric = (kind, label, value) => ({ kind, label, value });
+  const restPlatforms = (await via("GET", "/platforms")).body.data;
+  ok(
+    same(restPlatforms.find((p) => p.id === "mastodon").metrics.reports.map((r) => r.label), ["Favourites", "Replies", "Boosts", "Quotes"]) && restPlatforms.find((p) => p.id === "telegram").metrics.available === false && restPlatforms.find((p) => p.id === "linkedin").metrics.reason.startsWith("LinkedIn gives post statistics only to apps it has approved"),
+    "REST: each network says which counts it reports under its own words, or why it has none",
+  );
+  const firstStatus = received.mastodon[0].id;
+  const background = await until(async () => {
+    const data = await numbersOf(posted.id);
+    return on(data, "mastodon").as_of && on(data, "bluesky").as_of && on(data, "discord").as_of ? data : null;
+  }, "the scheduler to read the first post's numbers", 60000);
+  ok(
+    same(on(background, "mastodon").metrics, [metric("likes", "Favourites", 4), metric("comments", "Replies", 1), metric("shares", "Boosts", 2)]) && !Number.isNaN(Date.parse(on(background, "mastodon").as_of)) && on(background, "mastodon").error === null,
+    "The scheduler read the first post's numbers from Mastodon in the background and stored them with the time they were read",
+    JSON.stringify(on(background, "mastodon")),
+  );
+  const firstReads = numberReads.mastodon.filter((r) => r.id === firstStatus);
+  ok(firstReads.length === 1 && firstReads[0].auth === `Bearer ${SECRET_TOKEN}`, "Over every tick since, Mastodon was asked for that post's numbers exactly once, as the account", JSON.stringify(firstReads));
+  ok(
+    same(on(background, "bluesky").metrics, [metric("likes", "Likes", 7), metric("comments", "Replies", 1), metric("shares", "Reposts", 3), metric("quotes", "Quotes", 0)]) && numberReads.bluesky.some((r) => r.uris.length === 1 && r.uris[0] === "at://did:plc:test/app.bsky.feed.post/3abc" && r.auth === "Bearer jwt"),
+    "Bluesky: the post view's counts were read by the post's at:// address, signed in as the account",
+    JSON.stringify(on(background, "bluesky")),
+  );
+  ok(same(on(background, "discord").metrics, [metric("likes", "Reactions", 3)]) && numberReads.discord.includes("m1"), "Discord: the webhook read back its own message and its reactions were added up");
+  const silent = ["telegram", "slack", "webhook", "sandbox"].map((platform) => on(background, platform));
+  ok(
+    silent.every((t) => t.available === false && t.metrics.length === 0 && t.as_of === null && t.error === null && t.unavailable_reason.length > 20) && on(background, "telegram").unavailable_reason.startsWith("Telegram's Bot API has no way"),
+    "Networks with no numbers to read say so with the reason, and carry no counts and no reading time",
+  );
+
+  // Refresh on demand: the networks are asked again and the new reading replaces the old one on screen
+  standinCounts.mastodon[firstStatus] = { replies_count: 5, reblogs_count: 6, favourites_count: 40 };
+  standinCounts.bluesky = { likeCount: 70, repostCount: 30, replyCount: 10, quoteCount: 2 };
+  let lastRefresh;
+  const refreshedNumbers = await until(async () => {
+    // A refresh pressed within half a minute of a reading is not sent to the network, so this asks until both are let through.
+    lastRefresh = await via("POST", `/posts/${posted.id}/analytics/refresh`);
+    const data = await numbersOf(posted.id);
+    return on(data, "mastodon").metrics[0].value === 40 && on(data, "bluesky").metrics[0].value === 70 ? data : null;
+  }, "a refresh to reach Mastodon and Bluesky", 60000);
+  ok(
+    lastRefresh.status === 200 && lastRefresh.body.data.refreshed.length === 7 && same(on(refreshedNumbers, "mastodon").metrics, [metric("likes", "Favourites", 40), metric("comments", "Replies", 5), metric("shares", "Boosts", 6)]) && on(refreshedNumbers, "mastodon").as_of > on(background, "mastodon").as_of && on(refreshedNumbers, "bluesky").metrics[3].value === 2,
+    "REST: refreshing a post reads its networks again, and the new numbers carry a later time",
+    JSON.stringify(lastRefresh.body),
+  );
+  ok(
+    numberReads.mastodon.filter((r) => r.id === firstStatus).length === 2 && lastRefresh.body.data.refreshed.find((r) => r.target_id === on(background, "sandbox").target_id).message === "Numbers are not available for Sandbox. The sandbox publishes nowhere, so there is nothing to count.",
+    "The refresh asked Mastodon once more and no oftener, and told a network without numbers why nothing was read",
+  );
+
+  // A failed reading keeps the last good one
+  const partialTarget = partial.targets.find((t) => t.platform === "mastodon");
+  const beforeFailure = await until(async () => {
+    const mine = on(await numbersOf(partial.id), "mastodon");
+    return mine.as_of ? mine : null;
+  }, "the scheduler to read the second post's numbers", 60000);
+  numbersDown.add(partialTarget.external_id);
+  const afterFailure = await until(async () => {
+    const tried = await via("POST", `/posts/${partial.id}/analytics/refresh`);
+    return tried.body.data.refreshed.find((r) => r.target_id === partialTarget.id).outcome === "failed" ? on(tried.body.data, "mastodon") : null;
+  }, "a refresh to reach the stand-in while it is down", 60000);
+  numbersDown.delete(partialTarget.external_id);
+  ok(
+    afterFailure.as_of === beforeFailure.as_of && same(afterFailure.metrics, beforeFailure.metrics) && afterFailure.metrics.length === 3 && afterFailure.error.message === "Mastodon answered 503: The stand-in is not reporting on this status" && afterFailure.error.at > beforeFailure.as_of,
+    "A failed reading keeps the last good numbers and their time, and records why the new one failed",
+    JSON.stringify(afterFailure),
+  );
+  const failedNumbersPage = await page(`/app/posts?post=${partial.id}`);
+  const numbersPage = await page(`/app/posts?post=${posted.id}`);
+  ok(
+    numbersPage.includes("Refresh numbers") && numbersPage.includes("Favourites") && numbersPage.includes(">40<") && numbersPage.includes("As of") && numbersPage.includes("Numbers are not available for Telegram.") && failedNumbersPage.includes("The last try failed at") && failedNumbersPage.includes("Mastodon answered 503: The stand-in is not reporting on this status") && failedNumbersPage.includes("The numbers shown are from the reading before."),
+    "The posts page shows each target's numbers as of their time, a Refresh action, the reason a reading failed, and the networks with no numbers",
+  );
+
+  // The overview: totals, the per-network breakdown and a row per published copy, all from stored readings
+  const totalOf = (data, kind) => data.totals.find((t) => t.kind === kind);
+  const overview = await until(async () => {
+    const data = (await api("/api/v1/analytics?period=7", { headers: auth })).body.data;
+    const seen = (kind) => (totalOf(data, kind)?.networks ?? []).map((p) => p.platform).sort().join();
+    return seen("views") === "facebook" && seen("impressions") === "pinterest,x" ? data : null;
+  }, "the scheduler to read the numbers of the posts made after signing in", 60000);
+  const sumOfRows = (kind) => overview.rows.reduce((sum, row) => sum + (row.metrics.find((x) => x.kind === kind)?.value ?? 0), 0);
+  ok(
+    overview.totals.length >= 6 && overview.totals.every((t) => t.value === sumOfRows(t.kind) && t.value === t.networks.reduce((sum, p) => sum + p.value, 0)) && overview.rows.every((row) => (row.metrics.length === 0 || row.as_of) && (row.available || (row.metrics.length === 0 && row.as_of === null))),
+    "REST: every total is the sum of the stored readings in its rows, one kind at a time, and every number has a reading time",
+    JSON.stringify(overview.totals.map((t) => [t.kind, t.value, sumOfRows(t.kind)])),
+  );
+  ok(
+    totalOf(overview, "views").value === 64 && totalOf(overview, "views").networks[0].network === "Facebook Page" && same(totalOf(overview, "impressions").networks.map((p) => [p.platform, p.label]), [["x", "Impressions"], ["pinterest", "Impressions"]]) && totalOf(overview, "impressions").missing.some((x) => x.platform === "facebook" && x.reason === "Facebook Page does not report impressions."),
+    "REST: views and impressions are separate totals, and each names the networks it leaves out",
+    JSON.stringify([totalOf(overview, "views"), totalOf(overview, "impressions")]),
+  );
+  const likes = totalOf(overview, "likes");
+  ok(
+    likes.networks.some((p) => p.platform === "mastodon" && p.label === "Favourites") && likes.networks.some((p) => p.platform === "discord" && p.label === "Reactions") && likes.missing.find((x) => x.platform === "telegram").reason.startsWith("Not available for Telegram. Telegram's Bot API") && likes.missing.find((x) => x.platform === "pinterest").reason === "Pinterest does not report likes." && overview.networks.find((n) => n.platform === "telegram").available === false,
+    "REST: a total carries each network's own word for the count, and says which networks are missing and why",
+    JSON.stringify(likes.missing),
+  );
+  ok(numberReads.x.every((r) => r.fields === "public_metrics") && numberReads.x.length >= 2 && signIns.tweets.length === 3 && numberReads.pinterest.every((r) => r.metrics === "IMPRESSION,OUTBOUND_CLICK,PIN_CLICK,SAVE" && /^\d{4}-\d\d-\d\d$/.test(r.start) && r.end >= r.start) && numberReads.facebook.some((r) => r.insights && r.asked === "post_media_view,post_clicks"), "X, Pinterest and Facebook were asked for numbers in their documented shapes, and reading numbers posted nothing");
+  const byAccount = (await api(`/api/v1/analytics?period=30&account_id=${ids.bluesky}`, { headers: auth })).body.data;
+  const byTagged = (await api(`/api/v1/analytics?period=90&tag=${encodeURIComponent("VERIFY WEEKLY")}`, { headers: auth })).body.data;
+  const badPeriod = await api("/api/v1/analytics?period=14", { headers: auth });
+  ok(
+    byAccount.rows.length > 0 && byAccount.rows.every((row) => row.platform === "bluesky") && byAccount.networks.length === 1 && byTagged.rows.length === 2 && byTagged.rows.every((row) => row.post_id === mcpPost.id) && badPeriod.status === 400 && /period must be 7, 30 or 90/.test(badPeriod.body.error.message),
+    "REST: analytics takes a period of 7, 30 or 90 days and filters by account and by tag",
+    JSON.stringify([byAccount.rows.length, byTagged.rows.map((row) => row.post_id), badPeriod.body]),
+  );
+  ok(
+    (await api("/api/v1/analytics")).status === 401 && (await api(`/api/v1/posts/${posted.id}/analytics`)).status === 401 && (await api(`/api/v1/posts/${posted.id}/analytics/refresh`, { method: "POST" })).status === 401 && [SECRET_TOKEN, SECRET_SIGNING, ...everySecret].every((secret) => !JSON.stringify([overview, refreshedNumbers, lastRefresh.body]).includes(secret)),
+    "Analytics refuses a request with no key, and none of its answers holds a credential",
+  );
+
+  // The same numbers through MCP, read-only
+  const analyst = new Client({ name: "verify-analytics", version: "1.0.0" });
+  await analyst.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp`), { requestInit: { headers: { authorization: `Bearer ${token}` } } }));
+  const analystTools = (await analyst.listTools()).tools.filter((t) => t.name === "get_analytics" || t.name === "get_post_analytics");
+  ok(analystTools.length === 2 && analystTools.every((t) => t.annotations?.readOnlyHint === true && /Read-only: it reports stored readings and asks no network/.test(t.description)), "MCP: get_analytics and get_post_analytics are offered as read-only tools that ask no network");
+  // The scheduler may still be taking first readings of the newest posts, so the comparison is made across a moment in which it took none.
+  const storedIn = (data) => ({ posts: data.posts, totals: data.totals, networks: data.networks, rows: data.rows });
+  const quiet = await until(async () => {
+    const readsBefore = JSON.stringify(numberReads);
+    const rest = (await api("/api/v1/analytics?period=7", { headers: auth })).body.data;
+    const viaMcp = result(await analyst.callTool({ name: "get_analytics", arguments: { period: 7 } }));
+    const post = result(await analyst.callTool({ name: "get_post_analytics", arguments: { post_id: posted.id } }));
+    const restAfter = (await api("/api/v1/analytics?period=7", { headers: auth })).body.data;
+    return same(storedIn(rest), storedIn(restAfter)) && JSON.stringify(numberReads) === readsBefore ? { rest, viaMcp, post } : null;
+  }, "the scheduler to finish its first readings", 60000);
+  const mcpBadPeriod = await analyst.callTool({ name: "get_analytics", arguments: { period: 14 } });
+  ok(
+    same(storedIn(quiet.viaMcp), storedIn(quiet.rest)) && quiet.viaMcp.period.days === 7 && same(on(quiet.post, "mastodon").metrics, on(refreshedNumbers, "mastodon").metrics) && on(quiet.post, "mastodon").as_of === on(refreshedNumbers, "mastodon").as_of && quiet.post.manage_url === `${base}/app/posts?post=${posted.id}` && mcpBadPeriod.isError === true,
+    "MCP: get_analytics and get_post_analytics return the same stored numbers and times as REST, and asked no network for them",
+    JSON.stringify([quiet.viaMcp.totals?.map((t) => [t.kind, t.value]), quiet.rest.totals.map((t) => [t.kind, t.value])]),
+  );
+  await analyst.close();
+
+  // The screen
+  const analyticsPage = await page("/app/analytics?period=7");
+  const shown = (await api("/api/v1/analytics?period=7", { headers: auth })).body.data;
+  ok(
+    analyticsPage.includes("Totals") && analyticsPage.includes('id="chart-title"') && analyticsPage.includes("Views by network") && analyticsPage.includes("Favourites") && analyticsPage.includes("Not available for Telegram.") && analyticsPage.includes("Not in this total:") && analyticsPage.includes("One row for each copy of a post on a network.") && analyticsPage.includes(`/app/posts?post=${posted.id}`) && analyticsPage.includes("Broadside verify: one post, every network."),
+    "The analytics page shows totals, a chart by network, the per-network breakdown and a row for each published copy linking to its post",
+  );
+  ok(shown.totals.every((t) => analyticsPage.includes(`>${new Intl.NumberFormat("en-US").format(t.value)}<`)) && shown.totals.every((t) => analyticsPage.includes(`>${t.label}<`)), "Every total on the analytics page is a figure the API holds, under its own name", JSON.stringify(shown.totals.map((t) => [t.label, t.value])));
+  const quietPeriod = await page(`/app/analytics?account=${ids.slack}`);
+  ok(quietPeriod.includes("No numbers have been read for these posts yet.") && quietPeriod.includes("Not available for Slack.") && !quietPeriod.includes('id="chart-title"'), "For an account whose network has no numbers, the page says so and draws no chart");
+  ok((await page("/app")).includes('href="/app/analytics"'), "The rail links to Analytics");
 
   // The optional password: a second boot with BROADSIDE_PASSWORD set
   app.kill("SIGTERM");

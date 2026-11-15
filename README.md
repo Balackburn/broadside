@@ -23,6 +23,8 @@ Four things keep a busy install in order:
 - **Account groups.** A group is a named set of connected accounts, such as "Launch day". Make groups under **Accounts**; picking one in the composer selects exactly its accounts. Disconnect an account and its groups have one fewer member.
 - **Signatures.** A signature is saved text for the end of a post: a sign-off or a set of hashtags. **Add signature** in the composer puts it into the post text, where you can edit it and it counts toward every network's limit. An account can have a default signature. The composer offers it for that account and adds it only when you ask.
 
+It reads back the numbers. For each published post Broadside asks the network for the counts it holds: views or impressions, likes, comments, shares, saves and clicks, whichever that network reports. **Analytics** shows totals for the last 7, 30 or 90 days, a breakdown by network and a row for each copy of a post, and an expanded post in **Posts** shows its numbers with a **Refresh numbers** action. Every figure is a reading stored with the time it was taken, shown as "as of". Nothing is estimated: a count a network does not report is absent, and a network with no numbers to read is named with the reason. See [Analytics](#analytics).
+
 It is also an MCP server. Claude, Cursor, Codex and other MCP clients can list accounts, check a post, publish, schedule and confirm delivery. You type credentials into Broadside, so they stay out of the chat.
 
 It runs as one Node process with one SQLite file. There is no queue, no database server and no account with anyone.
@@ -65,7 +67,9 @@ Any Streamable HTTP client works with the same URL and header. A local stdio ser
 { "mcpServers": { "broadside": { "command": "npx", "args": ["tsx", "/path/to/broadside/bin/broadside-mcp.ts"] } } }
 ```
 
-Tools: `list_platforms`, `list_accounts`, `list_groups`, `connect_account`, `disconnect_account`, `upload_media`, `list_media`, `list_tags`, `list_signatures`, `check_post`, `create_post`, `get_post`, `list_posts`, `update_post`, `publish_post`, `cancel_post`, `stop_series`, `retry_target`, `delete_post`.
+Tools: `list_platforms`, `list_accounts`, `list_groups`, `connect_account`, `disconnect_account`, `upload_media`, `list_media`, `list_tags`, `list_signatures`, `check_post`, `create_post`, `get_post`, `list_posts`, `update_post`, `publish_post`, `cancel_post`, `stop_series`, `retry_target`, `delete_post`, `get_analytics`, `get_post_analytics`.
+
+`get_analytics` (a period of 7, 30 or 90 days, and optionally an account or a tag) and `get_post_analytics` are read-only. They report the readings Broadside has stored and ask no network.
 
 `create_post` and `update_post` take `tags`, and `group_id` in place of `targets` to post to a saved group. `check_post` takes `group_id` too, and `list_posts` filters by `tag`. A signature is text: an agent that wants one reads it from `list_signatures` and puts it at the end of the post itself.
 
@@ -96,6 +100,8 @@ Add `"tags": ["launch", "weekly"]` to tag a post; a tag that does not exist yet 
 | `POST /check` | Dry run against each account's rules |
 | `GET, POST /posts` · `GET, PATCH, DELETE /posts/{id}` | Create (send an `Idempotency-Key` header), read, edit |
 | `POST /posts/{id}/publish` · `/cancel` · `/targets/{targetId}/retry` | Act on a post. `/cancel` with `{"series": true}` stops a whole repeating series |
+| `GET /analytics` | Totals, a per-network breakdown and one row per published copy of a post. Takes `period` (7, 30 or 90 days, by publish time; default 30), and optionally `account_id` and `tag`. Reads stored readings only |
+| `GET /posts/{id}/analytics` · `POST /posts/{id}/analytics/refresh` | One post's numbers per published target, each with `as_of`. `refresh` asks the networks now and says how each reading went |
 | `GET, POST /keys` · `DELETE /keys/{id}` | API keys |
 
 Responses are `{ "data": … }` or `{ "error": { "code", "message", "details" } }`.
@@ -128,6 +134,8 @@ Threads accepts only https redirect addresses, so on `http://localhost` its dial
 
 Things worth knowing before you rely on a network:
 
+- **Numbers are tested the way posting is: against documented shapes and stand-ins, not live networks.** `npm run verify` reads numbers end to end from stand-in Mastodon, Bluesky, Discord, X, Facebook and Pinterest; the rest are covered by request-shape tests. Bluesky's and Reddit's numbers were written from the published lexicon and Reddit's JSON wiki, without their reference pages to hand, so check those two against one post first. DEV documents only a reaction count, so comments and page views are not read. Where a network leaves a field out of a post nobody reacted to or shared (Discord's reactions, Facebook's shares), Broadside reads that as none.
+
 - **These connectors are tested against each network's documented API shapes, not against the live networks.** `npm run verify` exercises Mastodon, Bluesky, Discord, Telegram, Slack and the webhook against local stand-ins, and the sign-in of X, LinkedIn, Facebook Pages, Instagram, YouTube and Pinterest against stand-ins that behave as those networks document; the rest are covered by request-shape tests. No sign-in has been run against a live network from this repository. Try a new account with one post before scheduling many.
 - **Threads work on 11 networks.** X, Bluesky, Mastodon, Threads, Telegram, Reddit, Lemmy and Nostr publish each part as a reply to the one before. Facebook Pages, Instagram and LinkedIn publish each part as a comment under the post. Some need an extra permission: `pages_manage_engagement` on Facebook, `instagram_manage_comments` on Instagram and `threads_manage_replies` on Threads. Discord, Slack, TikTok, YouTube, Pinterest, DEV and the webhook cannot take a thread. `npm run verify` proves threads against the Mastodon, Bluesky and Telegram stand-ins; the other eight are covered by request-shape tests.
 - **Repeating posts count their dates from the first occurrence.** A monthly post set for the 31st goes out on the last day of shorter months and returns to the 31st. With a time zone the post keeps its local clock time when the clocks change; without one the dates are counted in UTC. Occurrences missed while Broadside was not running are skipped, so the next one is always in the future.
@@ -135,7 +143,38 @@ Things worth knowing before you rely on a network:
 - **TikTok and Pinterest restrict unapproved apps:** TikTok posts are private or inbox drafts until the app is audited; Pinterest trial-access pins are visible only to you.
 - **LinkedIn signs you in for 60 days.** Unless LinkedIn has approved your app for refresh tokens, that account needs reconnecting every two months, and Broadside marks it when the time is up. Threads tokens are refreshed each time Broadside posts.
 - **A sign-in that is renewed by posting lapses if nothing is posted.** X after about six months, Pinterest after 60 days. Reconnect the account when that happens.
-- **Not supported yet:** video on X, LinkedIn and Facebook; media on the later parts of a thread; stories; analytics; editing or deleting a post after it is published.
+- **Not supported yet:** video on X, LinkedIn and Facebook; media on the later parts of a thread; stories; numbers for the later parts of a thread, or over time as a chart; editing or deleting a post after it is published.
+
+## Analytics
+
+Broadside reads a post's numbers from the network it was published to, using that network's own API and the account's own credentials. It reads them when you press **Refresh numbers**, and by itself for 30 days after a post goes out: about once an hour for each post, a few posts at a time, beside publishing and never ahead of it. A network that answers "too many requests" is left alone for as long as it asks. If a reading fails, the last good numbers stay with their time, and the reason is shown next to them.
+
+A thread is counted by its first part. Totals add up the latest reading of each post, one kind of count at a time. Views and impressions are separate totals, and so is a score, because networks mean different things by them. Each total names the networks it leaves out and why.
+
+| Network | What it reports | What it needs |
+| --- | --- | --- |
+| X | Impressions, likes, replies, reposts, quotes, bookmarks | Each read is billed from your X API credits. Without credits X refuses, and Broadside shows its answer |
+| Bluesky | Likes, replies, reposts, quotes | Nothing more |
+| Mastodon | Favourites, replies, boosts, and quotes from Mastodon 4.5 | `read:statuses` for followers-only posts. Public and unlisted posts are read without it |
+| Threads | Views, likes, replies, reposts, quotes | `threads_manage_insights` |
+| Instagram | Views, likes, comments, shares, saves | `instagram_manage_insights`. Instagram can take up to 48 hours to report |
+| Facebook Pages | Reactions, comments, shares; views and clicks | `read_insights` for views and clicks. The other three are read without it |
+| YouTube | Views, likes, comments | `youtube.readonly`, which sign-in already asked for |
+| TikTok | Views, likes, comments, shares | `video.list`, and a post that is public. A draft in your TikTok inbox has no numbers |
+| Pinterest | Impressions, saves, pin clicks, over the last 90 days | `pins:read` |
+| Reddit | Score, comments | Nothing more |
+| Lemmy | Upvotes, score, comments | Nothing more |
+| DEV | Reactions | Nothing more |
+| Discord | Reactions, added up across emoji | Nothing more |
+
+Not available, and shown as such instead of zeros:
+
+- **LinkedIn.** Post statistics need the permission `r_member_postAnalytics`, which LinkedIn gives only to apps it has approved for its Community Management API. An app with Share on LinkedIn alone cannot read them.
+- **Telegram.** The Bot API has no way to ask for a message's views or reactions.
+- **Nostr.** A note has no count. Reactions and replies are separate notes spread across relays, and no relay holds them all.
+- **Slack and the webhook.** They receive a post and report nothing back.
+
+**Accounts connected before analytics.** Threads, Instagram, Facebook Pages, TikTok and Pinterest now ask for one more permission when you sign in (the ones in the table). Accounts you connected earlier do not have it. They keep posting as before; their numbers show the network's refusal with a note to reconnect, and Facebook Pages still show reactions, comments and shares. Reconnect an account to grant the permission. A TikTok app must have `video.list` added to it first, or list its scopes without it in the Scopes field and go without TikTok numbers.
 
 ## Configuration
 
@@ -188,10 +227,11 @@ To put Broadside on the internet, keep it on `127.0.0.1` and publish it through 
 - `src/lib/posts.ts` is the engine: validate, fan out, record a status per target, retry transient failures. A target is claimed with a compare-and-set before it is sent, so two clocks can never post it twice, and a target interrupted mid-send is failed rather than resent. A thread is recorded part by part, so a retry continues where it stopped, and the next occurrence of a repeating post is created under the same kind of claim, exactly once.
 - `src/lib/oauth.ts` is the sign-in every network shares. Each connector describes its own network in an `oauth` block: where to approve, the scopes, the style of PKCE, how the code is exchanged and what is stored. `src/lib/platforms/oauth2.ts` renews tokens before a post and hands rotated ones back to be saved.
 - `src/lib/tags.ts`, `src/lib/groups.ts` and `src/lib/signatures.ts` hold tags, account groups and signatures. Their tables are created by the same additive migration as every column added since the first release, so an existing database gains them and keeps its data.
+- `src/lib/analytics.ts` reads numbers back. A connector's optional `metrics` function asks its network for one post's counts and returns only what the network answered, each under the network's own word. Every reading is stored with its time, and numbers that repeat the reading before move that time on instead of adding a row; a failed one leaves the last good row in place and records the reason. A target is claimed with a compare-and-set before it is read, so two clocks never ask twice, and a 429 pauses that account until the network's wait is over. The scheduler runs this beside publishing and waits for neither.
 - `src/lib/mcp.ts` defines the tools once; `/mcp` (HTTP) and `bin/broadside-mcp.ts` (stdio) both serve them.
 - `src/lib/scheduler.ts` is an in-process clock started with the server.
 
-Adding a network is one object that implements `Connector` in `src/lib/platforms/types.ts`, plus a line in the registry and a request-shape test. Give it a `reply` function if the network can answer its own post, and it takes threads.
+Adding a network is one object that implements `Connector` in `src/lib/platforms/types.ts`, plus a line in the registry and a request-shape test. Give it a `reply` function if the network can answer its own post, and it takes threads. Give it `metrics` and `reports` if the network's API gives an account its own post's counts, or `noMetrics` with the reason if it does not.
 
 ## Design
 
