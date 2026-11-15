@@ -1118,7 +1118,12 @@ try {
     "REST: a total carries each network's own word for the count, and says which networks are missing and why",
     JSON.stringify(likes.missing),
   );
-  ok(numberReads.x.every((r) => r.fields === "public_metrics") && numberReads.x.length >= 2 && signIns.tweets.length === 3 && numberReads.pinterest.every((r) => r.metrics === "IMPRESSION,OUTBOUND_CLICK,PIN_CLICK,SAVE" && /^\d{4}-\d\d-\d\d$/.test(r.start) && r.end >= r.start) && numberReads.facebook.some((r) => r.insights && r.asked === "post_media_view,post_clicks"), "X, Pinterest and Facebook were asked for numbers in their documented shapes, and reading numbers posted nothing");
+  // The overview above waited for X to appear in a total. One reading does that, so the second X post may still be waiting its turn.
+  ok(
+    numberReads.x.length >= 1 && numberReads.x.every((r) => r.fields === "public_metrics") && signIns.tweets.length === 3 && numberReads.pinterest.every((r) => r.metrics === "IMPRESSION,OUTBOUND_CLICK,PIN_CLICK,SAVE" && /^\d{4}-\d\d-\d\d$/.test(r.start) && r.end >= r.start) && numberReads.facebook.some((r) => r.insights && r.asked === "post_media_view,post_clicks"),
+    "X, Pinterest and Facebook were asked for numbers in their documented shapes, and reading numbers posted nothing",
+    JSON.stringify([numberReads.x, numberReads.pinterest, numberReads.facebook, signIns.tweets.length]),
+  );
   const byAccount = (await api(`/api/v1/analytics?period=30&account_id=${ids.bluesky}`, { headers: auth })).body.data;
   const byTagged = (await api(`/api/v1/analytics?period=90&tag=${encodeURIComponent("VERIFY WEEKLY")}`, { headers: auth })).body.data;
   const badPeriod = await api("/api/v1/analytics?period=14", { headers: auth });
@@ -1156,8 +1161,15 @@ try {
   await analyst.close();
 
   // The screen
-  const analyticsPage = await page("/app/analytics?period=7");
-  const shown = (await api("/api/v1/analytics?period=7", { headers: auth })).body.data;
+  // The page and the API are compared across a moment in which no new reading was stored.
+  const screen = await until(async () => {
+    const before = (await api("/api/v1/analytics?period=7", { headers: auth })).body.data;
+    const html = await page("/app/analytics?period=7");
+    const after = (await api("/api/v1/analytics?period=7", { headers: auth })).body.data;
+    return same(storedIn(before), storedIn(after)) ? { html, data: after } : null;
+  }, "the analytics page and the API to be read in the same state", 60000);
+  const analyticsPage = screen.html;
+  const shown = screen.data;
   ok(
     analyticsPage.includes("Totals") && analyticsPage.includes('id="chart-title"') && analyticsPage.includes("Views by network") && analyticsPage.includes("Favourites") && analyticsPage.includes("Not available for Telegram.") && analyticsPage.includes("Not in this total:") && analyticsPage.includes("One row for each copy of a post on a network.") && analyticsPage.includes(`/app/posts?post=${posted.id}`) && analyticsPage.includes("Broadside verify: one post, every network."),
     "The analytics page shows totals, a chart by network, the per-network breakdown and a row for each published copy linking to its post",
