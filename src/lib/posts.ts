@@ -53,6 +53,8 @@ export type Post = {
   feed: { id: string; title: string | null } | null;
   /** Why a draft made from a feed item is being held: it does not fit a network it was meant for. Null on every other post. */
   held_reason: string | null;
+  /** The team member who wrote the post. Null without a team, for a post a feed made, and for one made with a key that belongs to no one. `name` is null once that member has been removed. */
+  author: { id: string; name: string | null } | null;
   created_at: string;
   updated_at: string;
   /** Set while this occurrence is due to be followed by another. */
@@ -100,6 +102,7 @@ type PostRow = {
   repeat_spawned: number;
   feed_id: string | null;
   held_reason: string | null;
+  created_by: string | null;
 };
 type TargetRow = Omit<Target, "options" | "url" | "parts"> & { options: string; external_url: string | null; post_id: string; parts: string; parts_done: number };
 
@@ -111,6 +114,8 @@ type Internal = {
   feed_id?: string;
   /** Save the post as a held draft, with the reason, when it does not fit a network, instead of refusing it. */
   hold?: boolean;
+  /** The team member writing the post, from the session or the key that made the request. */
+  created_by?: string | null;
 };
 
 /**
@@ -175,6 +180,8 @@ function feedTitle(id: string): string | null {
   return feed.title || new URL(feed.url).host;
 }
 
+const memberName = (id: string): string | null => get<{ name: string }>("SELECT name FROM members WHERE id = ?", id)?.name ?? null;
+
 function hydrate(row: PostRow): Post {
   const thread = JSON.parse(row.thread) as string[];
   const targets = all<TargetRow>("SELECT * FROM targets WHERE post_id = ? ORDER BY rowid", row.id).map((t): Target => {
@@ -209,6 +216,7 @@ function hydrate(row: PostRow): Post {
     origin: row.origin,
     feed: row.feed_id ? { id: row.feed_id, title: feedTitle(row.feed_id) } : null,
     held_reason: row.held_reason ?? null,
+    author: row.created_by ? { id: row.created_by, name: memberName(row.created_by) } : null,
     created_at: row.created_at,
     updated_at: row.updated_at,
     repeat: row.repeat_every ? { every: row.repeat_every, until: row.repeat_until, timezone: row.repeat_zone } : null,
@@ -374,7 +382,7 @@ export async function createPost(input: PostInput, fetcher: typeof fetch = fetch
   database.exec("BEGIN");
   try {
     run(
-      "INSERT INTO posts (id, content, media, thread, publish_at, origin, feed_id, held_reason, idempotency_key, series_id, repeat_every, repeat_until, repeat_zone, repeat_anchor, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      "INSERT INTO posts (id, content, media, thread, publish_at, origin, feed_id, held_reason, created_by, idempotency_key, series_id, repeat_every, repeat_until, repeat_zone, repeat_anchor, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       id,
       content,
       JSON.stringify(mediaIds),
@@ -383,6 +391,8 @@ export async function createPost(input: PostInput, fetcher: typeof fetch = fetch
       internal.feed_id ? "feed" : (input.origin ?? "api"),
       internal.feed_id ?? null,
       held,
+      // A feed's post has no author, whoever set the feed up.
+      internal.feed_id ? null : (internal.created_by ?? null),
       input.idempotency_key ?? null,
       repeat ? newId("ser") : null,
       repeat?.every ?? null,
@@ -505,13 +515,15 @@ function lineUpNext(postId: string): void {
       const id = newId("post");
       const stamp = now();
       run(
-        "INSERT INTO posts (id, content, media, thread, publish_at, origin, series_id, repeat_every, repeat_until, repeat_zone, repeat_anchor, repeat_count, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO posts (id, content, media, thread, publish_at, origin, created_by, series_id, repeat_every, repeat_until, repeat_zone, repeat_anchor, repeat_count, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         id,
         row.content,
         row.media,
         row.thread,
         next.at,
         row.origin,
+        // The next occurrence is still the work of whoever set the series going.
+        row.created_by ?? null,
         row.series_id,
         row.repeat_every,
         row.repeat_until,

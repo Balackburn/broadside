@@ -7,6 +7,7 @@ import { connector } from "./platforms";
 import { reason, tokenFields, tokenRequest } from "./platforms/oauth2";
 import { PublishError, type Choice, type Connector, type Context, type Credentials, type OAuthSpec } from "./platforms/types";
 import { redirectAddress } from "./redirect";
+import { isRole, lower, type Role } from "./roles";
 
 /**
  * Sign-in with a network, for connectors that describe one. You bring your own
@@ -23,7 +24,9 @@ import { redirectAddress } from "./redirect";
  * this Broadside started. A sign-in that ends in a choice (which Page, which
  * board) leaves a second row of the same kind, holding what may be chosen.
  */
-type SignIn = { kind: "sign-in"; app: Credentials; verifier?: string; redirectUri: string; base: string };
+type SignIn = { kind: "sign-in"; app: Credentials; verifier?: string; redirectUri: string; base: string; starter?: Starter | null };
+/** The team member who began a sign-in, and the role they began it with. Null when there was no team, or the key that began it belongs to no one. */
+export type Starter = { member_id: string; role: Role };
 type Choosing = { kind: "choice"; choices: Choice[] };
 
 const TEN_MINUTES = 10 * 60_000;
@@ -60,7 +63,7 @@ function pending<T extends SignIn | Choosing>(id: string, kind: T["kind"], platf
 
 export const redirectUri = (base: string, platform: string): string => redirectAddress(base, platform, connector(platform)?.oauth?.loopback);
 
-export function startOAuth(platform: string, input: Credentials, base: string): { url: string; redirect_uri: string } {
+export function startOAuth(platform: string, input: Credentials, base: string, starter: Starter | null = null): { url: string; redirect_uri: string } {
   const c = connector(platform);
   const spec = c?.oauth;
   if (!c || !spec) throw new InputError(`${c?.name ?? platform} is connected by pasting credentials, not by signing in.`);
@@ -75,7 +78,7 @@ export function startOAuth(platform: string, input: Credentials, base: string): 
   if (spec.httpsOnly && !redirect.startsWith("https://")) {
     throw new InputError(`${c.name} only accepts an https redirect address, and this Broadside is at ${new URL(redirect).origin}. Set BROADSIDE_PUBLIC_URL to an https address to sign in, or connect by pasting a token.`);
   }
-  const signIn: SignIn = { kind: "sign-in", app, redirectUri: redirect, base: base.replace(/\/+$/, "") };
+  const signIn: SignIn = { kind: "sign-in", app, redirectUri: redirect, base: base.replace(/\/+$/, ""), starter };
   if (spec.pkce !== "none") signIn.verifier = verifier();
   const state = hold(platform, signIn);
 
@@ -94,6 +97,28 @@ export function startOAuth(platform: string, input: Credentials, base: string): 
   }
   for (const [key, value] of Object.entries(spec.authorize ?? {})) url.searchParams.set(key, value);
   return { url: url.toString(), redirect_uri: redirect };
+}
+
+/**
+ * Who a callback speaks for. The browser comes back from the network without
+ * a session to show (another site sent it, and sometimes to another name for
+ * this machine), so the state value stands for whoever began the sign-in.
+ * Their role is read again here: a member demoted or disabled in the ten
+ * minutes a sign-in may take does not finish it as an admin.
+ *
+ * Undefined when the state is not a sign-in waiting here. Null when it is,
+ * and the one who began it may no longer act at all.
+ */
+export function oauthStarter(state: string): { role: Role; member: { id: string; name: string } | null; via: "session"; team: boolean } | null | undefined {
+  if (!state) return undefined;
+  const signIn = pending<SignIn>(state, "sign-in", undefined, false);
+  if (typeof signIn === "string") return undefined;
+  const team = Boolean(get("SELECT 1 AS team FROM members LIMIT 1"));
+  if (!team) return { role: "owner", member: null, via: "session", team };
+  if (!signIn.starter) return null;
+  const member = get<{ id: string; name: string; role: string; disabled_at: string | null }>("SELECT id, name, role, disabled_at FROM members WHERE id = ?", signIn.starter.member_id);
+  if (!member || member.disabled_at || !isRole(member.role)) return null;
+  return { role: lower(signIn.starter.role, member.role), member: { id: member.id, name: member.name }, via: "session", team };
 }
 
 /** Network errors met while signing in are shown as they are; they were written to be read. */

@@ -110,6 +110,11 @@ const ADDED: [table: string, column: string, definition: string][] = [
   ["posts", "held_reason", "TEXT"],
   // Outgoing webhooks: the outcome last announced for a post, so one outcome is announced once however many clocks see it.
   ["posts", "announced", "TEXT"],
+  // Teams: the member who wrote a post (null for a feed's, and for any post made before there was a team),
+  // and the member an API key belongs to with the role it was given. Both null on a key made before the team.
+  ["posts", "created_by", "TEXT"],
+  ["api_keys", "member_id", "TEXT"],
+  ["api_keys", "role", "TEXT"],
 ];
 
 /**
@@ -247,6 +252,29 @@ CREATE TABLE IF NOT EXISTS feed_items (
   PRIMARY KEY (feed_key, item_key)
 );
 CREATE INDEX IF NOT EXISTS feed_items_post ON feed_items(post_id);
+CREATE TABLE IF NOT EXISTS members (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  name_key TEXT NOT NULL UNIQUE,
+  role TEXT NOT NULL,
+  password_hash TEXT NOT NULL,
+  session_nonce TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  disabled_at TEXT,
+  last_seen_at TEXT
+);
+CREATE TABLE IF NOT EXISTS invites (
+  id TEXT PRIMARY KEY,
+  token_hash TEXT NOT NULL UNIQUE,
+  role TEXT NOT NULL,
+  name TEXT NOT NULL,
+  name_key TEXT NOT NULL,
+  member_id TEXT,
+  created_by TEXT,
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  used_at TEXT
+);
 `;
 
 export function migrate(handle: DatabaseSync): void {

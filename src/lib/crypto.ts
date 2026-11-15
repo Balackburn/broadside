@@ -15,6 +15,9 @@ export function installSecret(): string {
   return readFileSync(file, "utf8").trim();
 }
 
+/** What sessions are signed with, beside each member's own password hash: BROADSIDE_SECRET, else the install's key file. Never empty. */
+export const serverSecret = (): string => process.env.BROADSIDE_SECRET || installSecret();
+
 /** The key that seals credentials: BROADSIDE_SECRET if the operator set one, else the install's key file. Unchanged since the first release, so existing data keeps opening. */
 function key(): Buffer {
   const fromEnv = process.env.BROADSIDE_SECRET;

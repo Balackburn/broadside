@@ -3,6 +3,11 @@
  * Starts the built app. It listens on this machine only unless you ask for
  * more, and it refuses to listen on a network without a password: an open
  * Broadside lets anyone who can reach it post as you.
+ *
+ * That holds for an install with a team too. Members then sign in with their
+ * own passwords and BROADSIDE_PASSWORD signs no one in, but it is still asked
+ * for here: if the team is ever dissolved (npm run members -- leave-team),
+ * the install falls back to that password and is never left open on a network.
  */
 import { spawn } from "node:child_process";
 

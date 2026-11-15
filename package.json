@@ -10,7 +10,9 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "check:design": "node scripts/check-design.mjs",
+    "check:routes": "node scripts/check-routes.mjs",
     "mcp": "tsx bin/broadside-mcp.ts",
+    "members": "tsx bin/members.ts",
     "verify": "node scripts/verify.mjs"
   },
   "dependencies": {

@@ -10,6 +10,11 @@ const LOOPBACK = ["localhost", "127.0.0.1", "[::1]"];
 
 export function hostAllowed(request: Request): boolean {
   if (process.env.BROADSIDE_PASSWORD) return true;
+  return hostListed(request);
+}
+
+/** Whether the Host header is a name this Broadside knows as its own: a loopback name, an allowed host, or the public URL's. */
+export function hostListed(request: Request): boolean {
   const host = (request.headers.get("host") ?? "").toLowerCase();
   const name = host.replace(/:\d+$/, "");
   if (LOOPBACK.includes(name)) return true;

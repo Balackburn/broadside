@@ -4,7 +4,7 @@ import { body, route } from "@/lib/http";
 
 type Ctx = RouteContext<"/api/v1/groups/[id]">;
 
-export const GET = route<Ctx>(async (_request, { params }) => {
+export const GET = route<Ctx>({ role: "viewer" }, async (_request, { params }) => {
   const { id } = await params;
   const group = getGroup(id);
   if (!group) throw new InputError(`No group with id ${id}.`);
@@ -12,13 +12,13 @@ export const GET = route<Ctx>(async (_request, { params }) => {
 });
 
 /** Renames a group or replaces its members with { name, account_ids }. Either may be left out. */
-export const PATCH = route<Ctx>(async (request, { params }) => {
+export const PATCH = route<Ctx>({ role: "editor" }, async (request, { params }) => {
   const { id } = await params;
   return updateGroup(id, await body<{ name?: unknown; account_ids?: unknown }>(request));
 });
 
 /** Deletes the group. Its accounts stay connected. */
-export const DELETE = route<Ctx>(async (_request, { params }) => {
+export const DELETE = route<Ctx>({ role: "editor" }, async (_request, { params }) => {
   const { id } = await params;
   if (!deleteGroup(id)) throw new InputError(`No group with id ${id}.`);
   return { deleted: id };

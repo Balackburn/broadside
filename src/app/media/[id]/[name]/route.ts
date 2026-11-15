@@ -1,10 +1,11 @@
+import { open } from "@/lib/http";
 import { getMedia, streamMedia } from "@/lib/media";
 
 /**
  * Media is served without a key so networks that pull files (Instagram,
  * Threads, TikTok photos) can fetch them. Ids are 72 random bits.
  */
-export async function GET(_request: Request, { params }: RouteContext<"/media/[id]/[name]">) {
+export const GET = open("Networks fetch media by address when a post goes out, and they hold no key or session. The id is the secret.", async (_request: Request, { params }: RouteContext<"/media/[id]/[name]">) => {
   const { id } = await params;
   const media = getMedia(id);
   if (!media) return new Response("Not found", { status: 404 });
@@ -19,4 +20,4 @@ export async function GET(_request: Request, { params }: RouteContext<"/media/[i
       "cross-origin-resource-policy": "cross-origin",
     },
   });
-}
+});
