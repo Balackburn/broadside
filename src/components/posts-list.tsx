@@ -3,7 +3,9 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import type { TargetNumbers } from "@/lib/analytics";
 import { tagKey } from "@/lib/tag-rules";
+import { Counts, Standing } from "./numbers";
 import { TagFilter, TagList, TagManager, type TagInfo } from "./tags";
 import { api, Icon, Stamp, Status, Tabs, Time, useToast } from "./ui";
 
@@ -38,7 +40,8 @@ const ORIGIN: Record<string, string> = { ui: "From the app", mcp: "From an agent
 const matches = (post: Post, filter: Filter) =>
   filter === "all" || (filter === "failed" ? post.status === "failed" || post.status === "partial" : filter === "scheduled" ? post.status === "scheduled" || post.status === "publishing" : post.status === filter);
 
-export function PostsList({ posts, tags, focus }: { posts: Post[]; tags: TagInfo[]; focus?: string }) {
+/** `numbers` holds what Broadside has read back for each published target, by target id. A target that has not gone out has no entry. */
+export function PostsList({ posts, tags, numbers = {}, focus }: { posts: Post[]; tags: TagInfo[]; numbers?: Record<string, TargetNumbers>; focus?: string }) {
   const router = useRouter();
   const { show, toast } = useToast();
   const [filter, setFilter] = useState<Filter>("all");
@@ -49,6 +52,33 @@ export function PostsList({ posts, tags, focus }: { posts: Post[]; tags: TagInfo
   // A tag that was renamed or deleted while it was the filter no longer exists, so the filter falls back to every tag.
   const filterTag = tag !== null && tags.some((t) => tagKey(t.name) === tagKey(tag)) ? tag : null;
   const shown = posts.filter((p) => matches(p, filter) && (filterTag === null || p.tags.some((name) => tagKey(name) === tagKey(filterTag))));
+
+  /** Asks each of a post's networks for its numbers now, and says how many answered. */
+  async function refresh(post: Post) {
+    setBusy(post.id);
+    try {
+      const result = await api<{ refreshed: { outcome: "read" | "failed" | "skipped"; reason?: string }[] }>(`/posts/${post.id}/analytics/refresh`, { method: "POST" });
+      const read = result.refreshed.filter((r) => r.outcome === "read").length;
+      const failed = result.refreshed.filter((r) => r.outcome === "failed").length;
+      const why = (reason: string) => result.refreshed.some((r) => r.reason === reason);
+      show(
+        failed
+          ? `Read ${read} of ${read + failed}. The reason is beside each network that failed.`
+          : read
+            ? "Numbers updated."
+            : why("paused")
+              ? "A network asked Broadside to slow down. When it reads again is beside the network."
+              : why("recent")
+                ? "These numbers were read a moment ago."
+                : "This post has no numbers to read.",
+      );
+      router.refresh();
+    } catch (error) {
+      show((error as Error).message);
+    } finally {
+      setBusy(null);
+    }
+  }
 
   async function act(key: string, path: string, method: string, done: string, body?: unknown) {
     setBusy(key);
@@ -178,6 +208,12 @@ export function PostsList({ posts, tags, focus }: { posts: Post[]; tags: TagInfo
                             </ol>
                           ) : null}
                           {t.error ? <p className="mt-2 text-sm text-bad">{t.error}</p> : null}
+                          {numbers[t.id] ? (
+                            <div className="mt-2 space-y-1">
+                              {numbers[t.id].metrics.length ? <Counts metrics={numbers[t.id].metrics} /> : null}
+                              <Standing numbers={numbers[t.id]} />
+                            </div>
+                          ) : null}
                         </li>
                       ))}
                     </ul>
@@ -224,6 +260,11 @@ export function PostsList({ posts, tags, focus }: { posts: Post[]; tags: TagInfo
                         <Link className="btn btn-sm" href={`/app?edit=${post.id}`}>
                           Edit
                         </Link>
+                      ) : null}
+                      {post.targets.some((t) => numbers[t.id]?.available) ? (
+                        <button type="button" className="btn btn-quiet btn-sm" disabled={busy === post.id} onClick={() => refresh(post)}>
+                          <Icon name="retry" size={16} /> Refresh numbers
+                        </button>
                       ) : null}
                       {editable ? (
                         <button type="button" className="btn btn-quiet btn-sm" disabled={busy === post.id} onClick={() => act(post.id, `/posts/${post.id}/publish`, "POST", "Published.")}>

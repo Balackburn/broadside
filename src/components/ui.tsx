@@ -56,6 +56,9 @@ const paths: Record<string, ReactNode> = {
   out: <path d="M8 16 16 8M9 8h7v7" />,
   retry: <path d="M19 12a7 7 0 1 1-2.5-5.4M19 5v4h-4" />,
   alert: <path d="M12 8v5M12 16.5h.01M12 3l9.5 17h-19L12 3Z" />,
+  chart: <path d="M4 20h16M7 20v-7M12 20V5M17 20v-10" />,
+  down: <path d="M12 5v14M6 13l6 6 6-6" />,
+  up: <path d="M12 19V5M6 11l6-6 6 6" />,
 };
 
 export function Icon({ name, size = 18 }: { name: keyof typeof paths | string; size?: number }) {
