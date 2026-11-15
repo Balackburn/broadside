@@ -5,13 +5,16 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExter
 
 /* Brand ------------------------------------------------------------------- */
 
-/** Three sheets fanned from one pivot: one post becoming many. */
+/** The mark: one post at the spine, going out three ways at once. */
 export function Mark({ size = 28 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 32 32" aria-hidden="true">
-      <rect x="10" y="4" width="12" height="18" rx="2" fill="var(--ink)" opacity="0.28" transform="rotate(-26 16 30)" />
-      <rect x="10" y="4" width="12" height="18" rx="2" fill="var(--ink)" transform="rotate(26 16 30)" />
-      <rect x="10" y="4" width="12" height="18" rx="2" fill="var(--signal)" />
+      <rect x="4.5" y="6" width="5.5" height="20" rx="2.75" fill="var(--signal)" />
+      <g fill="currentColor">
+        <rect x="13" y="13.25" width="14.5" height="5.5" rx="2.75" transform="rotate(-36 13.5 16)" />
+        <rect x="13" y="13.25" width="15.5" height="5.5" rx="2.75" />
+        <rect x="13" y="13.25" width="14.5" height="5.5" rx="2.75" transform="rotate(36 13.5 16)" />
+      </g>
     </svg>
   );
 }

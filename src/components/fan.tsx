@@ -71,14 +71,9 @@ function Sheet({
   const over = length > network.limits.maxChars;
   return (
     <article
-      className={`sheet ${className ?? ""}`}
+      className={`sheet paper ${className ?? ""}`}
       data-over={over}
-      style={{
-        ...style,
-        boxShadow: over
-          ? undefined
-          : "inset 0 0 0 1px var(--line), var(--float-shadow)",
-      }}
+      style={style}
     >
       <header className="mb-3 flex items-center justify-between gap-3">
         <span className="flex items-center gap-2 font-medium">

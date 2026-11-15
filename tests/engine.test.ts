@@ -1,16 +1,22 @@
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { beforeAll, describe, expect, it } from "vitest";
+import { existsSync, writeFileSync } from "node:fs";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 process.env.BROADSIDE_DATA_DIR = mkdtempSync(path.join(tmpdir(), "broadside-test-"));
 process.env.BROADSIDE_SECRET = "test-secret";
+// The stand-in networks in this file are not real hosts; the outbound guard has its own tests below.
+process.env.BROADSIDE_ALLOW_PRIVATE_FETCH = "1";
 
 const { connectAccount, credentialsOf, InputError, listAccounts } = await import("@/lib/accounts");
 const { open, seal } = await import("@/lib/crypto");
 const { get, run } = await import("@/lib/db");
 const { authorized, createKey, revokeKey } = await import("@/lib/keys");
-const { saveMedia } = await import("@/lib/media");
+const { deleteMedia, getMedia, importMedia, saveMedia, sniff } = await import("@/lib/media");
+const { guardedFetch, isPrivateAddress } = await import("@/lib/net");
+const { hostAllowed } = await import("@/lib/hosts");
+const { sessionValue, signedIn, SESSION_COOKIE } = await import("@/lib/session");
 const { aggregate, cancelPost, createPost, dueTargets, getPost, publishNow, recoverInterrupted, retryTarget, updatePost } = await import("@/lib/posts");
 const { tick } = await import("@/lib/scheduler");
 
@@ -126,6 +132,119 @@ describe("publishing", () => {
     const post = await createPost({ content: "with image", targets: [{ account_id: sandboxA }], media_ids: [media.id] });
     expect(post.media[0]).toMatchObject({ id: media.id, type: "image", alt: "alt" });
     await expect(createPost({ content: "x", targets: [{ account_id: sandboxA }], media_ids: ["med_missing"] })).rejects.toThrow(/No media with id med_missing/);
+  });
+});
+
+describe("importing media by URL", () => {
+  beforeAll(() => {
+    delete process.env.BROADSIDE_ALLOW_PRIVATE_FETCH;
+  });
+  afterAll(() => {
+    process.env.BROADSIDE_ALLOW_PRIVATE_FETCH = "1";
+  });
+
+  it("knows which addresses are not on the public internet", () => {
+    for (const a of ["127.0.0.1", "10.1.2.3", "172.16.0.1", "192.168.1.11", "169.254.169.254", "100.64.0.1", "0.0.0.0", "::1", "::", "[::1]", "::ffff:127.0.0.1", "fd00::1", "fe80::1", "not-an-ip"]) {
+      expect(isPrivateAddress(a), a).toBe(true);
+    }
+    for (const a of ["93.184.216.34", "8.8.8.8", "172.32.0.1", "2606:4700:4700::1111"]) expect(isPrivateAddress(a), a).toBe(false);
+  });
+
+  it("refuses an IPv6 loopback literal instead of crashing on it", async () => {
+    await expect(importMedia("http://[::1]/x.png", undefined, (async () => png()) as typeof fetch)).rejects.toThrow(/private network/);
+    await expect(importMedia("http://[::ffff:127.0.0.1]/x.png", undefined, (async () => png()) as typeof fetch)).rejects.toThrow(/private network/);
+  });
+
+  it("guards connector requests the same way, and lets public ones through", async () => {
+    const inner = (async () => Response.json({ ok: true })) as typeof fetch;
+    await expect(guardedFetch(inner)("http://169.254.169.254/latest/meta-data")).rejects.toThrow(/private network/);
+    await expect(guardedFetch(inner)("http://192.168.1.1/api/v1/accounts/verify_credentials")).rejects.toThrow(/private network/);
+    expect((await guardedFetch(inner)("http://93.184.216.34/ok")).status).toBe(200);
+  });
+
+  const png = () => new Response(new Uint8Array([137, 80, 78, 71]), { headers: { "content-type": "image/png" } });
+
+  it("refuses an address inside the private network", async () => {
+    await expect(importMedia("http://127.0.0.1/secret.png", undefined, (async () => png()) as typeof fetch)).rejects.toThrow(/private network/);
+    await expect(importMedia("http://169.254.169.254/latest/meta-data", undefined, (async () => png()) as typeof fetch)).rejects.toThrow(/private network/);
+    await expect(importMedia("file:///etc/passwd")).rejects.toThrow(/http:\/\/ or https:\/\//);
+  });
+
+  it("checks every redirect hop, so a public address cannot bounce the fetch inward", async () => {
+    const calls: string[] = [];
+    const bouncing = (async (input: RequestInfo | URL) => {
+      calls.push(String(input));
+      return new Response(null, { status: 302, headers: { location: "http://10.0.0.5/internal.png" } });
+    }) as typeof fetch;
+    await expect(importMedia("http://93.184.216.34/pic.png", undefined, bouncing)).rejects.toThrow(/private network/);
+    expect(calls).toEqual(["http://93.184.216.34/pic.png"]);
+  });
+
+  it("follows a redirect that stays public, and gives up on a loop", async () => {
+    const once = (async (input: RequestInfo | URL) =>
+      String(input).endsWith("/a.png") ? new Response(null, { status: 301, headers: { location: "/b.png" } }) : png()) as typeof fetch;
+    expect((await importMedia("http://93.184.216.34/a.png", undefined, once)).content_type).toBe("image/png");
+    const loop = (async () => new Response(null, { status: 302, headers: { location: "/again.png" } })) as typeof fetch;
+    await expect(importMedia("http://93.184.216.34/x.png", undefined, loop)).rejects.toThrow(/too many times/);
+  });
+
+  it("refuses a file type that is not a picture or a video", async () => {
+    const html = (async () => new Response("<script>alert(1)</script>", { headers: { "content-type": "text/html" } })) as typeof fetch;
+    await expect(importMedia("http://93.184.216.34/page.html", undefined, html)).rejects.toThrow(/accepts JPEG/);
+    const svg = (async () => new Response("<svg/>", { headers: { "content-type": "image/svg+xml" } })) as typeof fetch;
+    await expect(importMedia("http://93.184.216.34/x.svg", undefined, svg)).rejects.toThrow(/accepts JPEG/);
+  });
+});
+
+describe("stored media", () => {
+  it("takes its type from the bytes, and refuses a text file dressed as a picture", () => {
+    expect(sniff(new Uint8Array([0xff, 0xd8, 0xff, 0xe0]))).toBe("image/jpeg");
+    expect(sniff(new TextEncoder().encode("-----BEGIN OPENSSH PRIVATE KEY-----"))).toBeNull();
+    expect(() => saveMedia(new TextEncoder().encode("-----BEGIN OPENSSH PRIVATE KEY-----"), "key.png", "image/png")).toThrow(/is not a JPEG/);
+    expect(saveMedia(new Uint8Array([0xff, 0xd8, 0xff, 0xe0]), "really-a-jpeg.png", "image/png").content_type).toBe("image/jpeg");
+  });
+
+  it("deletes only a file that belongs to a stored record, never a path", () => {
+    const canary = path.join(process.env.BROADSIDE_DATA_DIR!, "canary.txt");
+    writeFileSync(canary, "keep me");
+    for (const id of ["../canary.txt", "..%2Fcanary.txt", "../../etc/hosts", "med_../canary.txt", ""]) {
+      expect(deleteMedia(id), id).toBe(false);
+      expect(getMedia(id), id).toBeUndefined();
+    }
+    expect(existsSync(canary)).toBe(true);
+    const real = saveMedia(new Uint8Array([137, 80, 78, 71]), "one.png", "image/png");
+    expect(deleteMedia(real.id)).toBe(true);
+    expect(deleteMedia(real.id)).toBe(false);
+  });
+});
+
+describe("who may use the app without a key", () => {
+  const from = (host: string) => new Request("http://x/", { headers: { host } });
+
+  it("answers only on localhost when no password is set", () => {
+    delete process.env.BROADSIDE_PASSWORD;
+    expect(hostAllowed(from("localhost:3000"))).toBe(true);
+    expect(hostAllowed(from("127.0.0.1:3000"))).toBe(true);
+    expect(hostAllowed(from("evil.example"))).toBe(false);
+    expect(hostAllowed(from("192.168.1.11:3000"))).toBe(false);
+    process.env.BROADSIDE_PUBLIC_URL = "https://post.example.com";
+    expect(hostAllowed(from("post.example.com"))).toBe(true);
+    delete process.env.BROADSIDE_PUBLIC_URL;
+  });
+
+  it("issues sessions that expire and cannot be forged", async () => {
+    process.env.BROADSIDE_PASSWORD = "correct horse";
+    const value = await sessionValue();
+    const withCookie = (v: string) => new Request("http://x/", { headers: { cookie: `${SESSION_COOKIE}=${v}` } });
+    expect(value).toMatch(/^\d+\.[0-9a-f]{64}$/);
+    expect(await signedIn(withCookie(value))).toBe(true);
+    expect(await signedIn(withCookie(value), Date.now() + 31 * 24 * 3600 * 1000)).toBe(false);
+    const [expires, signature] = value.split(".");
+    expect(await signedIn(withCookie(`${Number(expires) + 999}.${signature}`))).toBe(false);
+    expect(await signedIn(withCookie("anything"))).toBe(false);
+    process.env.BROADSIDE_PASSWORD = "changed";
+    expect(await signedIn(withCookie(value))).toBe(false);
+    delete process.env.BROADSIDE_PASSWORD;
   });
 });
 

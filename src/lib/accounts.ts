@@ -1,5 +1,6 @@
 import { newId, open, seal } from "./crypto";
 import { all, get, now, run } from "./db";
+import { guardedFetch } from "./net";
 import { connector } from "./platforms";
 import { PublishError, type Credentials } from "./platforms/types";
 
@@ -67,7 +68,7 @@ export async function connectAccount(platform: string, input: Credentials, fetch
   }
   let profile;
   try {
-    profile = await c.verify(credentials, { fetch: fetcher });
+    profile = await c.verify(credentials, { fetch: guardedFetch(fetcher) });
   } catch (error) {
     if (error instanceof PublishError) throw new InputError(error.message);
     throw new InputError(`${c.name} did not accept those details: ${(error as Error).message}`);

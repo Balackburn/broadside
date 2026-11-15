@@ -6,8 +6,8 @@
  * Exits non-zero on the first thing that is not true.
  */
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { createServer } from "node:http";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createServer, request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -293,6 +293,11 @@ try {
   const fromDisk = result(await local.callTool({ name: "upload_media", arguments: { path: diskImage } }));
   const localPost = result(await local.callTool({ name: "create_post", arguments: { content: "from stdio", targets: [{ account_id: ids.sandbox }], media_ids: [fromDisk.id] } }));
   ok(localPost.status === "published" && localPost.media[0].id === fromDisk.id, "The stdio server uploads a file from disk and publishes with it");
+  const secret = path.join(dataDir, "not-a-picture.png");
+  writeFileSync(secret, "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n");
+  const dressed = await local.callTool({ name: "upload_media", arguments: { path: secret, content_type: "image/png" } });
+  const wrongKind = await local.callTool({ name: "upload_media", arguments: { path: "/etc/hosts", content_type: "image/png" } });
+  ok(dressed.isError && /is not a JPEG/.test(dressed.content[0].text) && wrongKind.isError && /can be uploaded from disk/.test(wrongKind.content[0].text), "The stdio server will not read a non-media file, whatever type the caller claims");
   await local.close();
 
   // REST parity and the web pages
@@ -325,6 +330,33 @@ try {
   const posts = await fetch(`${base}/app/posts`).then((r) => r.text());
   ok(posts.includes("Broadside verify: one post, every network."), "The posts page shows what was published");
 
+  // Findings from the security audit, each pinned
+  const asHost = (pathname, host, method = "GET") =>
+    new Promise((resolve) => {
+      const req = httpRequest({ host: "127.0.0.1", port, path: pathname, method, headers: { host, "sec-fetch-site": "same-origin", "content-type": "application/json" } }, (res) => {
+        res.resume();
+        res.on("end", () => resolve(res.statusCode));
+      });
+      req.end(method === "POST" ? "{}" : undefined);
+    });
+  ok((await asHost("/api/v1/keys", "evil.example", "POST")) === 401 && (await asHost("/api/v1/accounts", "192.168.1.11:3000")) === 401, "Under another host name, a forged same-origin header gets nothing (no key can be minted)");
+  ok((await asHost("/app", "evil.example")) === 403 && (await asHost("/app", `localhost:${port}`)) === 200, "The app's pages answer on localhost and refuse a rebound domain");
+  const canary = path.join(dataDir, "canary.txt");
+  writeFileSync(canary, "keep me");
+  const traversal = await api("/api/v1/media/..%2Fcanary.txt", { method: "DELETE", headers: auth });
+  ok(traversal.status === 400 && existsSync(canary), "A path in place of a media id deletes nothing");
+
+  // Response hardening
+  const front = await fetch(`${base}/`);
+  const csp = front.headers.get("content-security-policy") ?? "";
+  ok(csp.includes("frame-ancestors 'none'") && csp.includes("object-src 'none'") && front.headers.get("x-frame-options") === "DENY" && front.headers.get("x-content-type-options") === "nosniff" && !front.headers.get("x-powered-by"), "Pages carry a closed content security policy and cannot be framed");
+  const file = await fetch(`${base}${media.url}`);
+  ok((file.headers.get("content-security-policy") ?? "").includes("sandbox") && file.headers.get("x-content-type-options") === "nosniff", "Uploaded media is served sandboxed, so it can never run as a page");
+  const notMedia = new FormData();
+  notMedia.set("file", new Blob(["<script>alert(1)</script>"], { type: "text/html" }), "page.html");
+  const rejected = await fetch(`${base}/api/v1/media`, { method: "POST", headers: { authorization: `Bearer ${token}` }, body: notMedia });
+  ok(rejected.status === 400, "An HTML file is refused as an upload");
+
   // The optional password: a second boot with BROADSIDE_PASSWORD set
   app.kill("SIGTERM");
   const lockedPort = port + 1;
@@ -338,9 +370,18 @@ try {
   ok(wrong.status === 401 && !wrong.headers.get("set-cookie"), "A wrong password is refused");
   const right = await fetch(`${locked}/api/login`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ password: "correct horse" }) });
   const cookie = (right.headers.get("set-cookie") ?? "").split(";")[0];
-  ok(right.status === 200 && /HttpOnly/.test(right.headers.get("set-cookie")), "The right password starts an HttpOnly session");
+  ok(right.status === 200 && /HttpOnly/.test(right.headers.get("set-cookie")) && /^broadside_session=\d+\.[0-9a-f]{64}$/.test(cookie), "The right password starts an HttpOnly session that carries its own expiry");
+  const crossSite = await fetch(`${locked}/api/login`, { method: "POST", headers: { "content-type": "application/json", "sec-fetch-site": "cross-site" }, body: JSON.stringify({ password: "correct horse" }) });
+  ok(crossSite.status === 403, "A sign-in posted from another site is refused");
   ok((await fetch(`${locked}/app`, { headers: { cookie }, redirect: "manual" })).status === 200 && (await fetch(`${locked}/api/v1/accounts`, { headers: { ...ui, cookie } })).status === 200, "A signed-in session reaches the app and its API");
   ok((await fetch(`${locked}/api/v1/accounts`, { headers: auth })).status === 200, "API keys keep working when a password is set");
+  let throttled = 0;
+  for (let i = 0; i < 12; i++) {
+    const guess = await fetch(`${locked}/api/login`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ password: `guess-${i}` }) });
+    if (guess.status === 429) throttled++;
+  }
+  const after = await fetch(`${locked}/api/login`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ password: "correct horse" }) });
+  ok(throttled >= 3 && after.status === 429 && after.headers.get("retry-after"), "Repeated wrong passwords are throttled, and the lock holds even for the right one");
 } catch (error) {
   failed = true;
   console.error(`\nverify: FAIL after ${checks} passing checks — ${error.message}`);

@@ -9,11 +9,13 @@ import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "src");
 const files = [];
+const vendored = [];
 (function walk(dir) {
   for (const name of readdirSync(dir)) {
     const full = path.join(dir, name);
     if (statSync(full).isDirectory()) walk(full);
-    else if (/\.(tsx|css)$/.test(name)) files.push(full);
+    // Vendored blocks keep their authors' styling; they must say where they came from instead.
+    else if (/\.(tsx|css)$/.test(name)) (full.includes(`${path.sep}vendor${path.sep}`) ? vendored : files).push(full);
   }
 })(root);
 
@@ -44,6 +46,10 @@ for (const file of files) {
     if (!/overflow-x: clip/.test(text)) fail(file, 1, "html and body must clip sideways overflow");
     if (!/:focus-visible/.test(text)) fail(file, 1, "missing a visible focus style");
   }
+}
+
+for (const file of vendored) {
+  if (!/MIT licensed/.test(readFileSync(file, "utf8").slice(0, 600))) failures.push(`${path.relative(root, file)}:1 vendored file must name its source and licence in its header`);
 }
 
 if (failures.length) {

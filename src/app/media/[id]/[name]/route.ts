@@ -1,4 +1,4 @@
-import { getMedia, readMedia } from "@/lib/media";
+import { getMedia, streamMedia } from "@/lib/media";
 
 /**
  * Media is served without a key so networks that pull files (Instagram,
@@ -8,7 +8,15 @@ export async function GET(_request: Request, { params }: RouteContext<"/media/[i
   const { id } = await params;
   const media = getMedia(id);
   if (!media) return new Response("Not found", { status: 404 });
-  return new Response(readMedia(id) as BodyInit, {
-    headers: { "content-type": media.content_type, "cache-control": "public, max-age=31536000, immutable", "x-content-type-options": "nosniff" },
+  return new Response(streamMedia(id), {
+    headers: {
+      "content-type": media.content_type,
+      "cache-control": "public, max-age=86400",
+      "content-length": String(media.size),
+      "x-content-type-options": "nosniff",
+      // An upload is only ever a picture or a video: no scripts, no framing, no plugins, whatever its bytes claim.
+      "content-security-policy": "default-src 'none'; sandbox",
+      "cross-origin-resource-policy": "cross-origin",
+    },
   });
 }

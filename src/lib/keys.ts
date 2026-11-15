@@ -1,3 +1,4 @@
+import { timingSafeEqual } from "node:crypto";
 import { newId, newToken, sha256 } from "./crypto";
 import { all, get, now, run } from "./db";
 
@@ -25,7 +26,9 @@ export function authorized(request: Request): boolean {
   const token = header.toLowerCase().startsWith("bearer ") ? header.slice(7).trim() : (request.headers.get("x-api-key") ?? "");
   if (!token) return false;
   // A key set in the environment lets a headless install be driven before anyone opens the app.
-  if (process.env.BROADSIDE_API_KEY && token === process.env.BROADSIDE_API_KEY) return true;
+  // Compared as hashes in constant time, so response timing says nothing about the key.
+  const fixed = process.env.BROADSIDE_API_KEY;
+  if (fixed && timingSafeEqual(Buffer.from(sha256(token)), Buffer.from(sha256(fixed)))) return true;
   const found = get<{ id: string }>("SELECT id FROM api_keys WHERE hash = ?", sha256(token));
   if (!found) return false;
   run("UPDATE api_keys SET last_used_at = ? WHERE id = ?", now(), found.id);

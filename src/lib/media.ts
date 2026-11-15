@@ -1,10 +1,10 @@
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { lookup } from "node:dns/promises";
-import { isIP } from "node:net";
+import { createReadStream, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { Readable } from "node:stream";
 import path from "node:path";
 import { InputError } from "./accounts";
 import { newId } from "./crypto";
 import { all, dataDir, get, now, run } from "./db";
+import { BlockedAddress, guardedFetch } from "./net";
 import type { MediaItem } from "./platforms/types";
 
 export type Media = {
@@ -27,9 +27,27 @@ const MAX_BYTES = Number(process.env.BROADSIDE_MAX_UPLOAD_MB ?? 512) * 1024 * 10
 
 const folder = () => {
   const dir = path.join(dataDir(), "media");
-  mkdirSync(dir, { recursive: true });
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
   return dir;
 };
+
+/** The largest upload accepted, in bytes. */
+export const maxUploadBytes = (): number => MAX_BYTES;
+
+/** Media ids are generated here and never contain a path separator; anything else is not an id. */
+const isId = (id: string): boolean => /^med_[A-Za-z0-9_-]{6,40}$/.test(id);
+
+/** What the bytes say they are, whatever the caller declared. */
+export function sniff(bytes: Uint8Array): string | null {
+  const head = Buffer.from(bytes.subarray(0, 16));
+  if (head.subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff]))) return "image/jpeg";
+  if (head.subarray(0, 4).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47]))) return "image/png";
+  if (head.subarray(0, 4).toString("latin1") === "GIF8") return "image/gif";
+  if (head.subarray(0, 4).toString("latin1") === "RIFF" && head.subarray(8, 12).toString("latin1") === "WEBP") return "image/webp";
+  if (head.subarray(4, 8).toString("latin1") === "ftyp") return head.subarray(8, 10).toString("latin1") === "qt" ? "video/quicktime" : "video/mp4";
+  if (head.subarray(0, 4).equals(Buffer.from([0x1a, 0x45, 0xdf, 0xa3]))) return "video/webm";
+  return null;
+}
 
 const safeName = (name: string) => name.replace(/[^\w.\-]+/g, "_").slice(-80) || "file";
 
@@ -53,6 +71,9 @@ export function saveMedia(bytes: Uint8Array, filename: string, contentType: stri
   const type = contentType.split(";")[0].trim().toLowerCase();
   if (!ALLOWED.includes(type)) throw new InputError(`Broadside accepts JPEG, PNG, WebP, GIF, MP4, MOV and WebM; this file is ${type || "of an unknown type"}.`);
   if (bytes.length === 0) throw new InputError("That file is empty.");
+  // The stored type comes from the bytes. A text file called a PNG is refused, so nothing but real media is ever kept or served.
+  const actual = sniff(bytes);
+  if (!actual) throw new InputError("That file is not a JPEG, PNG, WebP, GIF, MP4, MOV or WebM, whatever its name says.");
   if (bytes.length > MAX_BYTES) throw new InputError(`That file is larger than the ${MAX_BYTES / 1024 / 1024} MB limit.`);
   const id = newId("med");
   writeFileSync(path.join(folder(), id), bytes);
@@ -60,21 +81,13 @@ export function saveMedia(bytes: Uint8Array, filename: string, contentType: stri
     "INSERT INTO media (id, filename, content_type, size, alt, source_url, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
     id,
     safeName(filename),
-    type,
+    actual,
     bytes.length,
     extra.alt ?? null,
     extra.sourceUrl ?? null,
     now(),
   );
   return getMedia(id)!;
-}
-
-/** Refuses addresses inside the host's own network, so a pasted URL cannot be used to read internal services. */
-async function assertPublicHost(url: URL): Promise<void> {
-  if (process.env.BROADSIDE_ALLOW_PRIVATE_FETCH === "1") return;
-  const addresses = isIP(url.hostname) ? [url.hostname] : (await lookup(url.hostname, { all: true })).map((a) => a.address);
-  const internal = addresses.some((a) => /^(127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.|0\.|::1$|f[cd]|fe80)/i.test(a));
-  if (internal) throw new InputError("That address points inside a private network, so Broadside will not fetch it.");
 }
 
 export async function importMedia(sourceUrl: string, alt?: string, fetcher: typeof fetch = fetch): Promise<Media> {
@@ -85,17 +98,19 @@ export async function importMedia(sourceUrl: string, alt?: string, fetcher: type
     throw new InputError("That media URL is not a valid address.");
   }
   if (!/^https?:$/.test(url.protocol)) throw new InputError("Media URLs must start with http:// or https://.");
-  await assertPublicHost(url);
-  const response = await fetcher(url, { redirect: "follow" }).catch((cause: Error) => {
-    throw new InputError(`Could not download ${url.host}: ${cause.message}`);
+  // guardedFetch checks the first address and every redirect, so a public URL cannot bounce the download into the private network.
+  const response = await guardedFetch(fetcher)(url).catch((cause: Error) => {
+    throw new InputError(cause instanceof BlockedAddress ? cause.message : `Could not download ${url.host}: ${cause.message}`);
   });
   if (!response.ok) throw new InputError(`Could not download the media: ${url.host} answered ${response.status}.`);
+  if (Number(response.headers.get("content-length") ?? 0) > MAX_BYTES) throw new InputError(`That file is larger than the ${MAX_BYTES / 1024 / 1024} MB limit.`);
   const bytes = new Uint8Array(await response.arrayBuffer());
   const name = path.basename(url.pathname) || "media";
   return saveMedia(bytes, name, response.headers.get("content-type") ?? "", { alt, sourceUrl });
 }
 
 export function getMedia(id: string): Media | undefined {
+  if (!isId(id)) return undefined;
   const row = get<MediaRow>("SELECT * FROM media WHERE id = ?", id);
   return row && view(row);
 }
@@ -110,12 +125,22 @@ export function setAlt(id: string, alt: string): Media {
 }
 
 export function readMedia(id: string): Uint8Array {
+  if (!isId(id)) throw new InputError(`No media with id ${id}.`);
   return new Uint8Array(readFileSync(path.join(folder(), id)));
 }
 
+/** The file as a stream, so serving a large video never loads it into memory. */
+export function streamMedia(id: string): ReadableStream<Uint8Array> {
+  if (!isId(id)) throw new InputError(`No media with id ${id}.`);
+  return Readable.toWeb(createReadStream(path.join(folder(), id))) as ReadableStream<Uint8Array>;
+}
+
+/** The record goes first, and a file is only removed when a record for exactly that id existed. */
 export function deleteMedia(id: string): boolean {
+  if (!isId(id)) return false;
+  if (!run("DELETE FROM media WHERE id = ?", id)) return false;
   rmSync(path.join(folder(), id), { force: true });
-  return run("DELETE FROM media WHERE id = ?", id) > 0;
+  return true;
 }
 
 export function toItem(media: Media): MediaItem {

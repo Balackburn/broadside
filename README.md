@@ -30,6 +30,14 @@ npm start
 
 Open http://localhost:3000, go to **Accounts**, and connect a network (or add the sandbox). Then write a post in **Compose**.
 
+`npm start` listens on this machine only. To reach Broadside from other devices, set a password and say where it lives:
+
+```bash
+BROADSIDE_HOST=0.0.0.0 BROADSIDE_PASSWORD='choose-something' BROADSIDE_PUBLIC_URL='https://post.example.com' npm start
+```
+
+It refuses to listen on a network without a password.
+
 For development: `npm run dev`. To prove the whole thing works end to end: `npm run verify`.
 
 ## Connect an agent
@@ -90,13 +98,43 @@ Things worth knowing before you rely on a network:
 
 | Variable | Purpose |
 | --- | --- |
-| `BROADSIDE_PASSWORD` | Require a password for the web app. Set it before exposing Broadside to a network; without it, anyone who can reach the app can post. |
-| `BROADSIDE_PUBLIC_URL` | The public address of this app, used for media that networks fetch and for links handed to agents. |
+| `BROADSIDE_PASSWORD` | Password for the web app. Required before Broadside will listen beyond this machine. |
+| `BROADSIDE_HOST` | Address to listen on. Default `127.0.0.1`. |
+| `PORT` | Port to listen on. Default `3000`. |
+| `BROADSIDE_PUBLIC_URL` | The public address of this app. Used for media that networks fetch, for links handed to agents, and as an allowed host name. |
+| `BROADSIDE_ALLOWED_HOSTS` | Extra host names a passwordless install answers to, comma separated. |
 | `BROADSIDE_DATA_DIR` | Where the database, uploads and encryption key live. Default `./data`. Back this folder up. |
-| `BROADSIDE_SECRET` | Key material for encrypting credentials. Default: a key file created in the data folder. |
+| `BROADSIDE_SECRET` | Key material for encrypting credentials and signing sessions. Default: a key file created in the data folder. |
 | `BROADSIDE_API_KEY` | A fixed API key for headless installs. |
+| `BROADSIDE_MCP_DRAFTS_ONLY` | Set to `1` and agents can prepare posts but only a person can publish them, from the app. |
+| `BROADSIDE_ALLOW_PRIVATE_FETCH` | Set to `1` to let Broadside call addresses on your own network, such as an n8n webhook on localhost or a Mastodon instance on your LAN. |
 | `BROADSIDE_TICK_MS` | How often the scheduler looks for due posts. Default 5000. |
 | `BROADSIDE_MAX_UPLOAD_MB` | Largest accepted upload. Default 512. |
+
+## Security
+
+Broadside holds the keys to your social accounts, so this is how it protects them and where the edges are.
+
+Without a password it is a local tool. It listens on `127.0.0.1`, and it only answers requests addressed to `localhost`, which stops a web page from reaching it by pointing its own domain at your machine. Any program already running as you on the same machine can still use it; that is the same trust you give the data folder.
+
+With a password, the web app needs a signed session cookie that expires after 30 days. Wrong passwords are throttled. API and MCP callers always need a key; keys are 192 bits, stored hashed and shown once.
+
+Credentials are encrypted with AES-256-GCM and never returned by any API. The data folder is created readable by its owner only.
+
+Uploads are checked by their bytes, not their name, and only real images and videos are kept. They are served with a sandboxing policy, so a stored file is shown and never run. Every page carries a closed content security policy and cannot be framed.
+
+Outbound requests to addresses you type (media to import, a Mastodon instance, a webhook) are refused if they point at this machine or a private network, including after a redirect. Opt in with `BROADSIDE_ALLOW_PRIVATE_FETCH=1` for local targets.
+
+Agents see text that other people control: account names, error messages from networks, links. The MCP server tells agents to treat those as data. If you would rather an agent could never publish on its own, set `BROADSIDE_MCP_DRAFTS_ONLY=1`.
+
+Known limits:
+
+- API keys have no scopes and do not expire. Revoke one under Connect when you stop using it.
+- The private-address check resolves a name before connecting to it, so a hostile DNS server that changes its answer between the two could still get through. It narrows that hole and does not close it.
+- A few networks (Threads, Instagram, Facebook) take the access token in the URL, as their APIs require.
+- There is no audit log yet beyond the post history.
+
+To put Broadside on the internet, keep it on `127.0.0.1` and publish it through a tunnel with an access layer in front (Cloudflare Tunnel with an Access application, for example), allowing `/media/*` through so networks can fetch your media, and keep `BROADSIDE_PASSWORD` set as well. This layout is the recommendation from a security review of the code; the exact tunnel settings were not tested here.
 
 ## How it is built
 
@@ -109,9 +147,15 @@ Adding a network is one object that implements `Connector` in `src/lib/platforms
 
 ## Design
 
-The interface is dark, with a serif display face (Instrument Serif) over Geist. The front page borrows its language from Resend's site: a black ground, hairline cards and a 3D object in the hero. Broadside's version is its own CSS; no fonts, renders or code come from Resend.
+A dark room and lit paper: a black ground, bone-white text set in a condensed poster face (Bricolage Grotesque) over Geist, and posts drawn as printed sheets, the only bright surfaces on the page. One red is the spot colour.
 
-Network logos come from the CC0 [Simple Icons](https://simpleicons.org) set and belong to their owners. LinkedIn, Slack and Nostr are not in that set, so they show initials.
+Borrowed, with thanks, and all MIT licensed:
+
+- The hero turntable is the Carousel block from [bencho.dev](https://bencho.dev), adapted to hold a sheet per network. Only Bencho blocks under its MIT licence are used; its Pro blocks may not be redistributed, so none are in this repository.
+- The headline's letter-by-letter entrance is FlipText from [Obsidian UI](https://www.obsidianui.dev).
+- Network logos come from the CC0 [Simple Icons](https://simpleicons.org) set and belong to their owners. LinkedIn, Slack and Nostr are not in that set, so they show initials.
+
+The layout rhythm (hairline cards, section tiles, a 3D object in the hero) was learned from Resend's site. No fonts, renders or code come from it.
 
 ## Licence
 

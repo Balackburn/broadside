@@ -1,8 +1,8 @@
 import type { Metadata, Viewport } from "next";
-import { Geist, Geist_Mono, Instrument_Serif } from "next/font/google";
+import { Bricolage_Grotesque, Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 
-const display = Instrument_Serif({ variable: "--font-serif", subsets: ["latin"], weight: "400", display: "swap" });
+const display = Bricolage_Grotesque({ variable: "--font-poster", subsets: ["latin"], axes: ["wdth", "opsz"], display: "swap" });
 const text = Geist({ variable: "--font-geist", subsets: ["latin"], display: "swap" });
 const code = Geist_Mono({ variable: "--font-geist-mono", subsets: ["latin"], display: "swap" });
 

@@ -2,6 +2,7 @@ import { credentialsOf, getAccount, InputError, markAccount, saveCredentials } f
 import { newId } from "./crypto";
 import { all, db, get, now, run } from "./db";
 import { getMedia, toItem, type Media } from "./media";
+import { guardedFetch } from "./net";
 import { connector, problems } from "./platforms";
 import { PublishError } from "./platforms/types";
 
@@ -235,7 +236,7 @@ export async function publishTarget(targetId: string, fetcher: typeof fetch = fe
     const result = await c.publish(
       { text: target.content_override ?? post.content, media: post.media.map(toItem), options: JSON.parse(target.options) },
       credentialsOf(target.account_id),
-      { fetch: fetcher },
+      { fetch: guardedFetch(fetcher) },
     );
     if (result.credentials) saveCredentials(target.account_id, result.credentials);
     run(

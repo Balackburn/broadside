@@ -1,8 +1,12 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 56" role="img" aria-label="Broadside">
-  <g transform="translate(4 6) scale(1.5)">
-    <rect x="10" y="4" width="12" height="18" rx="2" fill="#16181d" opacity=".28" transform="rotate(-26 16 30)"/>
-    <rect x="10" y="4" width="12" height="18" rx="2" fill="#16181d" transform="rotate(26 16 30)"/>
-    <rect x="10" y="4" width="12" height="18" rx="2" fill="#e5391f"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 236 56" role="img" aria-label="Broadside">
+  <rect width="236" height="56" rx="12" fill="#000000"/>
+  <g transform="translate(10 4) scale(1.5)">
+    <rect x="4.5" y="6" width="5.5" height="20" rx="2.75" fill="#f0503a"/>
+    <g fill="#f0ede5">
+      <rect x="13" y="13.25" width="14.5" height="5.5" rx="2.75" transform="rotate(-36 13.5 16)"/>
+      <rect x="13" y="13.25" width="15.5" height="5.5" rx="2.75"/>
+      <rect x="13" y="13.25" width="14.5" height="5.5" rx="2.75" transform="rotate(36 13.5 16)"/>
+    </g>
   </g>
-  <text x="62" y="40" font-family="'Bricolage Grotesque','Helvetica Neue',Arial,sans-serif" font-weight="800" font-size="34" letter-spacing="-1.2" fill="#16181d">Broadside</text>
+  <text x="66" y="39" font-family="'Bricolage Grotesque','Helvetica Neue',Arial,sans-serif" font-weight="800" font-size="32" letter-spacing="-1.2" fill="#f0ede5">Broadside</text>
 </svg>

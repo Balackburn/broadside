@@ -1,4 +1,4 @@
-/* Hallmark · v2.0.0 · theme: custom, after Resend by request (black ground, serif display, hairline glass, 3D ring) · genre: modern-minimal · signature: one post turning in space as a card per network · Instrument Serif over Geist */
+/* Hallmark · v2.0.0 · theme: custom · a dark room and lit paper: black ground, bone ink, printed sheets as the only bright surfaces, one red spot colour · signature: one post as a sheet per network on a turntable you can swipe · Bricolage Grotesque (condensed) over Geist */
 /* critique: the fan carries the first screen; below it the page leans on type and tone fields with no photographs, by choice (no honest picture of this product exists but its own interface) */
 @import "tailwindcss";
 
@@ -9,7 +9,7 @@
   --paper: oklch(0 0 0);
   --paper-2: oklch(0.155 0.004 250);
   --paper-3: oklch(0.215 0.005 250);
-  --ink: oklch(0.955 0.002 250);
+  --ink: oklch(0.95 0.01 85);
   --ink-2: oklch(0.715 0.006 220);
   --ink-3: oklch(0.55 0.006 220);
   --line: oklch(0.93 0.03 240 / 0.14);
@@ -22,6 +22,24 @@
   --scrim: oklch(0 0 0 / 0.72);
   --float-shadow: 0 0 0 1px oklch(0.93 0.03 240 / 0.14), 0 24px 60px -12px oklch(0 0 0 / 0.9);
   --pill-shadow: 0 0 0 1px oklch(0.93 0.03 240 / 0.14);
+
+  /* Paper: a post is a printed sheet, the one bright thing in a dark room. */
+  --sheet: oklch(0.955 0.014 85);
+  --sheet-2: oklch(0.9 0.016 85);
+  --sheet-ink: oklch(0.2 0.012 262);
+  --sheet-ink-2: oklch(0.42 0.012 262);
+  --sheet-good: oklch(0.47 0.13 152);
+  --sheet-bad: oklch(0.5 0.2 27);
+  --sheet-line: oklch(0.2 0.012 262 / 0.14);
+  --sheet-shadow: 0 1px 0 oklch(1 0 0 / 0.6) inset, 0 30px 60px -20px oklch(0 0 0 / 0.9);
+  --halftone: radial-gradient(circle at center, oklch(0.95 0.01 85 / 0.2) 1px, oklch(0 0 0 / 0) 1.7px);
+  --spot: radial-gradient(50% 50% at 50% 50%, oklch(0 0 0) 0%, oklch(0 0 0 / 0) 100%);
+
+  /* Read by the vendored carousel. */
+  --bg: oklch(0 0 0);
+  --font-ui: var(--font-geist), system-ui, sans-serif;
+  --ink-rgb: 240, 237, 229;
+  --shadow-rgb: 0, 0, 0;
 
   /* Light: how surfaces catch it. */
   --text-fill: linear-gradient(to right bottom, oklch(1 0 0) 30%, oklch(1 0 0 / 0.5));
@@ -39,7 +57,7 @@
   --fade-ends: linear-gradient(oklch(0 0 0 / 0), oklch(0 0 0) 30%, oklch(0 0 0) 65%, oklch(0 0 0 / 0));
   --fade-sides: linear-gradient(90deg, oklch(0 0 0 / 0), oklch(0 0 0) 14%, oklch(0 0 0) 86%, oklch(0 0 0 / 0));
 
-  --font-display: var(--font-serif), Georgia, serif;
+  --font-display: var(--font-poster), "Helvetica Neue", sans-serif;
   --font-text: var(--font-geist), system-ui, sans-serif;
   --font-code: var(--font-geist-mono), ui-monospace, monospace;
 
@@ -115,20 +133,17 @@
 
   /* Type --------------------------------------------------------------------- */
 
-  /* Display: a serif set large, lit from the top left. */
+  /* Display: a condensed poster face, the voice of a printed bill. */
   .display {
     font-family: var(--font-display);
-    font-weight: 400;
-    line-height: 1;
-    letter-spacing: -0.012em;
+    font-variation-settings: "wdth" 76, "opsz" 96;
+    font-weight: 800;
+    line-height: 0.92;
+    letter-spacing: -0.03em;
     text-wrap: balance;
     overflow-wrap: break-word;
     min-width: 0;
-    padding-bottom: 0.08em;
-    background-image: var(--text-fill);
-    -webkit-background-clip: text;
-    background-clip: text;
-    color: transparent;
+    color: var(--ink);
   }
 
   /* Section heads: the text face, regular weight, drawn tight. */
@@ -820,59 +835,6 @@
     pointer-events: none;
   }
 
-  /* The ring: one post, struck once per network, turning in space. */
-  .ring-stage {
-    position: relative;
-    height: 360px;
-    perspective: 1500px;
-    -webkit-mask-image: var(--fade-sides);
-    mask-image: var(--fade-sides);
-  }
-  @media (min-width: 1024px) {
-    .ring-stage {
-      height: 440px;
-    }
-  }
-  .ring-tilt {
-    position: absolute;
-    inset: 0;
-    transform-style: preserve-3d;
-    /* Pushed back by the ring's radius, so the nearest card is at its true size and the rest recede. */
-    transform: translateZ(-330px) rotateX(-7deg);
-    will-change: transform;
-  }
-  .ring {
-    position: absolute;
-    left: 50%;
-    top: 50%;
-    width: 0;
-    height: 0;
-    transform-style: preserve-3d;
-    animation: ring-spin 48s linear infinite;
-  }
-  .ring[data-paused="true"] {
-    animation-play-state: paused;
-  }
-  @keyframes ring-spin {
-    to {
-      transform: rotateY(-360deg);
-    }
-  }
-  .ring-card {
-    position: absolute;
-    left: -124px;
-    top: -150px;
-    width: 248px;
-    height: 300px;
-    padding: 16px;
-    border-radius: var(--r-2);
-    background-color: var(--paper);
-    background-image: var(--card-light), var(--card-fill);
-    box-shadow: inset 0 0 0 1px var(--line-strong);
-    backface-visibility: hidden;
-    transform: rotateY(calc(var(--i) * 45deg)) translateZ(330px);
-  }
-
   .drop {
     animation: drop var(--duration-very-slow) var(--ease-smooth-out) both;
   }
@@ -966,6 +928,84 @@
     }
   }
 
+  /* Broadside's own ------------------------------------------------------- */
+
+  /* A sheet of paper: tokens are re-pointed inside it, so anything drawn on paper reads as ink. */
+  .paper {
+    --ink: var(--sheet-ink);
+    --ink-2: var(--sheet-ink-2);
+    --ink-3: var(--sheet-ink-2);
+    --good: var(--sheet-good);
+    --bad: var(--sheet-bad);
+    --line: var(--sheet-line);
+    --paper-3: var(--sheet-ink);
+    background-color: var(--sheet);
+    background-image: none;
+    color: var(--sheet-ink);
+    box-shadow: var(--sheet-shadow);
+  }
+  .paper .stamp {
+    background: var(--sheet-ink);
+    color: var(--sheet);
+    box-shadow: none;
+  }
+  .paper[data-over="true"] {
+    box-shadow: inset 0 0 0 2px var(--sheet-bad), var(--sheet-shadow);
+  }
+
+  /* Halftone: the dot screen of a press, fading out from under the hero. */
+  .halftone {
+    position: absolute;
+    inset: 0;
+    background-image: var(--halftone);
+    background-size: 9px 9px;
+    -webkit-mask-image: var(--spot);
+    mask-image: var(--spot);
+    pointer-events: none;
+  }
+
+  /* The hero ring sits on Bencho's fixed stage, enlarged on wide screens. */
+  .hero-ring {
+    display: grid;
+    place-items: center;
+    min-height: 380px;
+  }
+  @media (max-width: 520px) {
+    .hero-ring {
+      min-height: 280px;
+    }
+    .hero-ring > * {
+      zoom: 0.72;
+    }
+  }
+  @media (min-width: 1024px) {
+    .hero-ring > * {
+      zoom: 1.3;
+    }
+  }
+  .ring-face {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    padding: 14px;
+    border-radius: inherit;
+    text-align: left;
+  }
+
+  /* Type being set: each letter swings up into place once (Obsidian UI flip text). */
+  .flip-char {
+    transform-origin: 50% 100%;
+    backface-visibility: hidden;
+    animation: flip-in var(--flip-duration) var(--ease-smooth-out) var(--flip-delay) var(--flip-iteration) both;
+  }
+  @keyframes flip-in {
+    from {
+      opacity: 0;
+      transform: rotateX(-88deg) translateY(0.12em);
+    }
+  }
+
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -983,7 +1023,7 @@
   .fan-sheet,
   .drop,
   .scale-in,
-  .ring,
+  .flip-char,
   .pill::before,
   .shimmer,
   .caret::after {

@@ -4,8 +4,9 @@ import { AgentDemo, ComposeDemo, RetryDemo, ScheduleDemo } from "@/components/de
 import { Fan } from "@/components/fan";
 import { NetworkLogo } from "@/components/logos";
 import { NetworkRules } from "@/components/network-rules";
-import { Ring } from "@/components/ring";
+import { HeroRing } from "@/components/hero-ring";
 import { Icon, Mark, Wordmark } from "@/components/ui";
+import { FlipText } from "@/components/vendor/obsidian-flip-text";
 import { connectors } from "@/lib/platforms";
 
 export const metadata: Metadata = { alternates: { canonical: "/" } };
@@ -24,19 +25,6 @@ const BRINGS: Record<string, string> = {
   lemmy: "Your login",
   reddit: "A script app",
 };
-
-const RING = [
-  { id: "x", name: "X", handle: "@you" },
-  { id: "bluesky", name: "Bluesky", handle: "you.bsky.social" },
-  { id: "threads", name: "Threads", handle: "@you" },
-  { id: "mastodon", name: "Mastodon", handle: "@you@mastodon.social" },
-  { id: "instagram", name: "Instagram", handle: "@you" },
-  { id: "tiktok", name: "TikTok", handle: "@you" },
-  { id: "youtube", name: "YouTube", handle: "Your channel" },
-  { id: "telegram", name: "Telegram", handle: "@yourchannel" },
-];
-
-const RING_TEXT = "We shipped it. One post, written once, sent to every network we use.";
 
 const MCP_SNIPPET = `claude mcp add --transport http broadside \\
   http://localhost:3000/mcp \\
@@ -99,8 +87,10 @@ export default function Home() {
                 Open source under the MIT licence
                 <Icon name="out" size={14} />
               </a>
-              <h1 className="display rise mt-8 text-[clamp(3.25rem,7.4vw,6rem)]" style={{ "--i": 1 } as React.CSSProperties}>
-                One post for every network
+              <h1 className="display mt-8 text-[clamp(3.5rem,8vw,6.75rem)]">
+                <FlipText duration={0.9} delay={0.15} loop={false}>
+                  One post for every network
+                </FlipText>
               </h1>
               <p className="rise mt-5 max-w-lg text-lg leading-relaxed text-ink-2" style={{ "--i": 2 } as React.CSSProperties}>
                 Write a post once. Broadside sends it to X, Bluesky, Threads, Mastodon, LinkedIn and {networks.length - 5} more, from your browser or from your AI agent.
@@ -114,7 +104,10 @@ export default function Home() {
                 </a>
               </div>
             </div>
-            <Ring cards={RING} text={RING_TEXT} />
+            <div className="relative">
+              <div className="halftone" />
+              <HeroRing />
+            </div>
           </div>
         </section>
 

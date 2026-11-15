@@ -25,7 +25,7 @@ export function seal(value: unknown): string {
 
 export function open<T>(sealed: string): T {
   const [iv, tag, body] = sealed.split(".").map((s) => Buffer.from(s, "base64url"));
-  const decipher = createDecipheriv("aes-256-gcm", key(), iv);
+  const decipher = createDecipheriv("aes-256-gcm", key(), iv, { authTagLength: 16 });
   decipher.setAuthTag(tag);
   return JSON.parse(Buffer.concat([decipher.update(body), decipher.final()]).toString("utf8")) as T;
 }

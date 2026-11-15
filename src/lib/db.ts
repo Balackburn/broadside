@@ -1,5 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
-import { mkdirSync } from "node:fs";
+import { chmodSync, mkdirSync } from "node:fs";
 import path from "node:path";
 
 /**
@@ -9,7 +9,13 @@ import path from "node:path";
 
 export function dataDir(): string {
   const dir = process.env.BROADSIDE_DATA_DIR || path.join(process.cwd(), "data");
-  mkdirSync(dir, { recursive: true });
+  // Owner only: the folder holds credentials (encrypted), the key that opens them, and every post.
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  try {
+    chmodSync(dir, 0o700);
+  } catch {
+    /* a folder we do not own keeps its mode */
+  }
   return dir;
 }
 

@@ -1,4 +1,5 @@
 import { InputError } from "./accounts";
+import { hostAllowed } from "./hosts";
 import { authorized } from "./keys";
 import { publicBase } from "./media";
 import { signedIn } from "./session";
@@ -7,10 +8,9 @@ import { signedIn } from "./session";
 export function baseUrl(request: Request): string {
   const configured = publicBase();
   if (configured) return configured;
+  // Forwarded headers are client-controlled unless a proxy you run sets them, so links come from the request's own address.
   const url = new URL(request.url);
-  const host = request.headers.get("x-forwarded-host") ?? request.headers.get("host") ?? url.host;
-  const proto = request.headers.get("x-forwarded-proto") ?? url.protocol.replace(":", "");
-  return `${proto}://${host}`;
+  return `${url.protocol}//${request.headers.get("host") ?? url.host}`;
 }
 
 /**
@@ -20,6 +20,7 @@ export function baseUrl(request: Request): string {
  */
 export async function allowed(request: Request): Promise<boolean> {
   if (authorized(request)) return true;
+  if (!hostAllowed(request)) return false;
   // Sec-Fetch-Site stops other sites driving the API through a visitor's browser; the session cookie is what proves identity.
   return request.headers.get("sec-fetch-site") === "same-origin" && (await signedIn(request));
 }

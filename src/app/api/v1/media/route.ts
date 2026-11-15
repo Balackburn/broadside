@@ -1,11 +1,15 @@
 import { InputError } from "@/lib/accounts";
 import { body, route } from "@/lib/http";
-import { importMedia, listMedia, saveMedia } from "@/lib/media";
+import { importMedia, listMedia, maxUploadBytes, saveMedia } from "@/lib/media";
 
 export const GET = route(() => listMedia());
 
 /** Accepts a multipart upload (field "file", optional "alt") or JSON { url, alt }. */
 export const POST = route(async (request) => {
+  // Refused from the declared size, before any of the body is read into memory.
+  if (Number(request.headers.get("content-length") ?? 0) > maxUploadBytes() + 1024 * 1024) {
+    throw new InputError(`That upload is larger than the ${maxUploadBytes() / 1024 / 1024} MB limit.`);
+  }
   if ((request.headers.get("content-type") ?? "").includes("multipart/form-data")) {
     const form = await request.formData();
     const file = form.get("file");
