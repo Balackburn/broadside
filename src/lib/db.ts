@@ -109,9 +109,19 @@ const ADDED: [table: string, column: string, definition: string][] = [
 
 /**
  * Tables added after the first release: tags and the posts that carry them,
- * named groups of accounts, and saved signatures. Each is created only if it
- * is missing, so an existing database gains them and keeps every row it had.
+ * named groups of accounts, saved signatures, and the numbers read back from
+ * the networks. Each is created only if it is missing, so an existing database
+ * gains them and keeps every row it had.
  * `name_key` is the name folded to one case, so "Launch" and "launch" are one tag.
+ *
+ * Analytics keeps three things. `metric_readings` holds what a network
+ * answered about a published target: the counts, when they were first read
+ * (`since`) and when they were last read (`read_at`). A reading that repeats
+ * the one before moves `read_at` on instead of adding a row, so the table
+ * grows with the numbers and not with the clock. `metric_state` holds, per
+ * target, when a reading was last tried and why the last try failed, if it
+ * did. `metric_backoff` holds the accounts a network has asked
+ * Broadside to slow down for, and until when.
  */
 const ADDED_TABLES = `
 CREATE TABLE IF NOT EXISTS tags (
@@ -143,6 +153,27 @@ CREATE TABLE IF NOT EXISTS signatures (
   content TEXT NOT NULL,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS metric_readings (
+  id TEXT PRIMARY KEY,
+  target_id TEXT NOT NULL REFERENCES targets(id) ON DELETE CASCADE,
+  since TEXT NOT NULL,
+  read_at TEXT NOT NULL,
+  metrics TEXT NOT NULL,
+  note TEXT
+);
+CREATE INDEX IF NOT EXISTS metric_readings_target ON metric_readings(target_id, read_at);
+CREATE TABLE IF NOT EXISTS metric_state (
+  target_id TEXT PRIMARY KEY REFERENCES targets(id) ON DELETE CASCADE,
+  attempted_at TEXT NOT NULL,
+  error TEXT,
+  error_at TEXT
+);
+CREATE TABLE IF NOT EXISTS metric_backoff (
+  account_id TEXT PRIMARY KEY,
+  until TEXT NOT NULL,
+  strikes INTEGER NOT NULL DEFAULT 1,
+  reason TEXT
 );
 `;
 
