@@ -1,4 +1,4 @@
-import { call, images, json, PublishError, type Connector, type Context, type Credentials, type PartRef, type PublishResult } from "./types";
+import { call, counted, images, json, PublishError, type Connector, type Context, type Credentials, type PartRef, type PublishResult, type Reports } from "./types";
 
 type Session = { accessJwt: string; did: string; handle: string };
 
@@ -30,6 +30,9 @@ export function facets(text: string) {
   }
   return found;
 }
+
+/** The counts on a post view. Bluesky has no view count. */
+const reports: Reports = { likes: "Likes", comments: "Replies", shares: "Reposts", quotes: "Quotes" };
 
 export const bluesky: Connector = {
   id: "bluesky",
@@ -92,6 +95,21 @@ export const bluesky: Connector = {
     const reply = { root: strong(input.root), parent: strong(input.parent) };
     const s = await session(c, ctx);
     return create(s, { $type: "app.bsky.feed.post", text: input.text, createdAt: new Date().toISOString(), facets: facets(input.text), reply }, c, ctx);
+  },
+
+  reports,
+  async metrics(input, c, ctx) {
+    const s = await session(c, ctx);
+    // Asked of the account's own server, which passes app.bsky requests on to the app view as the signed-in account.
+    const found = await call<{ posts?: { uri: string; likeCount?: number; replyCount?: number; repostCount?: number; quoteCount?: number }[] }>(
+      ctx,
+      "Bluesky",
+      `${pds(c)}/xrpc/app.bsky.feed.getPosts?uris=${encodeURIComponent(input.id)}`,
+      { headers: { authorization: `Bearer ${s.accessJwt}` } },
+    );
+    const post = found.posts?.find((p) => p.uri === input.id);
+    if (!post) throw new PublishError("Bluesky returned no post for this address. It may have been deleted.");
+    return { metrics: counted(reports, { likes: post.likeCount, comments: post.replyCount, shares: post.repostCount, quotes: post.quoteCount }) };
   },
 };
 

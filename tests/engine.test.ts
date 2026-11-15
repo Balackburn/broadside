@@ -266,7 +266,7 @@ describe("signing in with TikTok", () => {
     expect(url.origin + url.pathname).toBe("https://www.tiktok.com/v2/auth/authorize/");
     expect(url.searchParams.get("client_key")).toBe("ck");
     expect(url.searchParams.get("redirect_uri")).toBe("http://localhost:3000/oauth/tiktok/callback");
-    expect(url.searchParams.get("scope")).toBe("user.info.basic,video.upload,video.publish");
+    expect(url.searchParams.get("scope")).toBe("user.info.basic,video.upload,video.publish,video.list");
     expect(url.searchParams.get("code_challenge")).toMatch(/^[0-9a-f]{64}$/);
     expect(url.searchParams.get("code_challenge_method")).toBe("S256");
     expect(url.toString()).not.toContain("cs");

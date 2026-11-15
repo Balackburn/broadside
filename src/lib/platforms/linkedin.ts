@@ -100,6 +100,8 @@ export const linkedin: Connector = {
   ],
   oauth,
   limits: { maxChars: 3000, count: "graphemes", maxImages: 20, maxVideos: 0, requiresMedia: false, maxReplyChars: 1250 },
+  // The memberCreatorPostAnalytics API needs r_member_postAnalytics, which comes only with the Community Management API.
+  noMetrics: "LinkedIn gives post statistics only to apps it has approved for its Community Management API. An app with Share on LinkedIn alone cannot read them.",
 
   async verify(c, ctx) {
     return session(c, ctx, async (live) => {

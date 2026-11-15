@@ -1,7 +1,11 @@
-import { blob, call, type Connector, type Credentials } from "./types";
+import { blob, call, counted, PublishError, withHint, type Connector, type Credentials, type Reports } from "./types";
 
 const base = (c: Credentials) => c.instance.replace(/\/+$/, "");
 const auth = (c: Credentials) => ({ authorization: `Bearer ${c.access_token}` });
+
+/** The Status entity's counts. Mastodon has no view count; quotes_count exists from Mastodon 4.5. */
+const reports: Reports = { likes: "Favourites", comments: "Replies", shares: "Boosts", quotes: "Quotes" };
+type Counts = { replies_count?: number; reblogs_count?: number; favourites_count?: number; quotes_count?: number };
 
 export const mastodon: Connector = {
   id: "mastodon",
@@ -9,7 +13,8 @@ export const mastodon: Connector = {
   docsUrl: "https://docs.joinmastodon.org/client/token/",
   setup: [
     "On your instance open Preferences, Development, New application.",
-    "Tick the scopes read:accounts, write:statuses and write:media, save, and copy the access token.",
+    "Tick the scopes read:accounts, read:statuses, write:statuses and write:media, save, and copy the access token.",
+    "read:statuses lets Broadside read the numbers of a followers-only post. Without it, numbers are read for public and unlisted posts only.",
   ],
   fields: [
     { key: "instance", label: "Instance URL", kind: "url", placeholder: "https://mastodon.social" },
@@ -69,5 +74,19 @@ export const mastodon: Connector = {
       }),
     });
     return { id: status.id, url: status.url };
+  },
+
+  reports,
+  async metrics(input, c, ctx) {
+    const url = `${base(c)}/api/v1/statuses/${encodeURIComponent(input.id)}`;
+    let status: Counts;
+    try {
+      status = await call<Counts>(ctx, "Mastodon", url, { headers: auth(c) });
+    } catch (refused) {
+      // A token made without read:statuses is refused here. A public or unlisted status can still be read with no token at all.
+      if (!(refused instanceof PublishError) || (refused.status !== 401 && refused.status !== 403)) throw refused;
+      status = await call<Counts>(ctx, "Mastodon", url).catch(() => withHint(refused, "Add the scope read:statuses to the application on your instance and paste its new token to read this post's numbers."));
+    }
+    return { metrics: counted(reports, { likes: status.favourites_count, comments: status.replies_count, shares: status.reblogs_count, quotes: status.quotes_count }) };
   },
 };

@@ -1,6 +1,6 @@
 import { createHmac, randomBytes } from "node:crypto";
 import { withSession } from "./oauth2";
-import { blob, call, images, videos, PublishError, type Connector, type Context, type Credentials, type OAuthSpec } from "./types";
+import { blob, call, counted, images, videos, PublishError, type Connector, type Context, type Credentials, type MetricsResult, type OAuthSpec, type Reports } from "./types";
 
 const enc = (s: string) => encodeURIComponent(s).replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
 
@@ -60,6 +60,10 @@ const oauth: OAuthSpec = {
   },
 };
 
+/** A post's public_metrics, under X's own names. */
+const reports: Reports = { impressions: "Impressions", likes: "Likes", comments: "Replies", shares: "Reposts", quotes: "Quotes", saves: "Bookmarks" };
+type PublicMetrics = { impression_count?: number; like_count?: number; reply_count?: number; retweet_count?: number; quote_count?: number; bookmark_count?: number };
+
 type Send = <T>(method: string, url: string, init?: RequestInit) => Promise<T>;
 
 /** Runs `work` with a way to send requests as this account, whichever way it was connected. */
@@ -85,6 +89,7 @@ export const x: Connector = {
     "Under User authentication settings choose Read and write, the app type Web App, Automated App or Bot, and add the redirect address shown below as a Callback URI.",
     "Copy the OAuth 2.0 Client ID and Client Secret from Keys and tokens, paste them here, then continue to X and approve.",
     "X signs you in for two hours at a time. Broadside renews that each time it posts, for as long as it posts at least once in six months.",
+    "Reading a post's numbers is a read of the X API, which X bills from your app's credits. Without credits X refuses, and Broadside shows its answer.",
   ],
   fields: [
     { key: "client_id", label: "Client ID", kind: "text", optional: true },
@@ -133,6 +138,19 @@ export const x: Connector = {
         body: JSON.stringify({ text: input.text, reply: { in_reply_to_tweet_id: input.parent.id } }),
       });
       return { id: tweet.data.id, url: `https://x.com/${c.username || "i"}/status/${tweet.data.id}` };
+    });
+  },
+
+  reports,
+  async metrics(input, c, ctx) {
+    return as<MetricsResult>(c, ctx, async (send) => {
+      const found = await send<{ data?: { public_metrics?: PublicMetrics }; errors?: { title?: string; detail?: string }[] }>("GET", `${API}/tweets/${encodeURIComponent(input.id)}?tweet.fields=public_metrics`);
+      const counts = found.data?.public_metrics;
+      // X answers 200 with an errors list for a post it will not show, such as one that was deleted.
+      if (!counts) throw new PublishError(`X returned no counts for this post: ${found.errors?.[0]?.detail ?? found.errors?.[0]?.title ?? "no details"}`);
+      return {
+        metrics: counted(reports, { impressions: counts.impression_count, likes: counts.like_count, comments: counts.reply_count, shares: counts.retweet_count, quotes: counts.quote_count, saves: counts.bookmark_count }),
+      };
     });
   },
 };

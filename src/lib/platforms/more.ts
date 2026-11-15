@@ -3,7 +3,7 @@ import { schnorr } from "@noble/curves/secp256k1.js";
 import { bech32 } from "@scure/base";
 import { assertPublicUrl } from "../net";
 import { tokenFields, withSession } from "./oauth2";
-import { call, images, json, videos, PublishError, type Choice, type Connector, type Context, type Credentials, type OAuthSpec } from "./types";
+import { call, callText, counted, images, json, videos, PublishError, withHint, type Choice, type Connector, type Context, type Credentials, type MetricsResult, type OAuthSpec, type Reports } from "./types";
 
 /** The first line of a post doubles as its title on networks that want one. */
 export function titleAndBody(text: string, options: Record<string, unknown>, max: number): { title: string; body: string } {
@@ -26,7 +26,8 @@ const formBody = (params: Record<string, string>): URLSearchParams => new URLSea
 const pinterestOAuth: OAuthSpec = {
   authorizeUrl: "https://www.pinterest.com/oauth/",
   tokenUrl: "https://api.pinterest.com/v5/oauth/token",
-  scopes: ["boards:read", "pins:write", "user_accounts:read"],
+  // pins:read is what lets a pin's numbers be read.
+  scopes: ["boards:read", "pins:read", "pins:write", "user_accounts:read"],
   scopeSeparator: ",",
   client: { id: "app_id", secret: "app_secret" },
   pkce: "none",
@@ -53,9 +54,14 @@ const pinterestOAuth: OAuthSpec = {
   },
   paste: {
     required: ["access_token", "board_id"],
-    help: "Generate an access token for your app with pins:write, boards:read and user_accounts:read. A board's id is listed by GET /v5/boards.",
+    help: "Generate an access token for your app with pins:write, pins:read, boards:read and user_accounts:read. A board's id is listed by GET /v5/boards.",
   },
 };
+
+/** Pinterest counts a pin over a range of days, at most the last 90. Clicks here are clicks on the pin itself. */
+const pinterestReports: Reports = { impressions: "Impressions", saves: "Saves", clicks: "Pin clicks" };
+const DAY = 86_400_000;
+const day = (time: number) => new Date(time).toISOString().slice(0, 10);
 
 export const pinterest: Connector = {
   id: "pinterest",
@@ -66,6 +72,7 @@ export const pinterest: Connector = {
     "Paste the App id and App secret key, then continue to Pinterest, approve, and pick the board to pin to.",
     "Pinterest signs you in for 30 days. Broadside renews that when it posts, as long as it posts at least once in 60 days.",
     "Apps on trial access create pins only you can see until Pinterest approves the app.",
+    "pins:read is what lets Broadside read a pin's impressions, saves and clicks. Pinterest reports them for the last 90 days.",
   ],
   fields: [
     { key: "app_id", label: "App id", kind: "text", optional: true },
@@ -117,6 +124,29 @@ export const pinterest: Connector = {
       return { id: pin.id, url: `https://www.pinterest.com/pin/${pin.id}` };
     });
   },
+
+  reports: pinterestReports,
+  async metrics(input, c, ctx) {
+    return pinterestSession<MetricsResult>(c, ctx, async (live) => {
+      const now = Date.now();
+      // Pinterest takes a start date no more than 90 days back, so an older pin is counted over the last 90 days only.
+      const earliest = now - 89 * DAY;
+      const published = input.publishedAt ? Date.parse(input.publishedAt) : earliest;
+      const found = await call<Record<string, { summary_metrics?: Record<string, unknown> }>>(
+        ctx,
+        "Pinterest",
+        `https://api.pinterest.com/v5/pins/${encodeURIComponent(input.id)}/analytics?start_date=${day(Math.max(published, earliest))}&end_date=${day(now)}&metric_types=IMPRESSION,OUTBOUND_CLICK,PIN_CLICK,SAVE`,
+        { headers: { authorization: `Bearer ${live.access_token}` } },
+      ).catch((error) => withHint(error, "Reading numbers needs the permission pins:read. If this account was connected without it, reconnect it."));
+      // With no split asked for, the answer holds one group of numbers under a single key.
+      const totals = Object.values(found)[0]?.summary_metrics;
+      if (!totals) throw new PublishError("Pinterest returned no numbers for this pin.");
+      return {
+        metrics: counted(pinterestReports, { impressions: totals.IMPRESSION, saves: totals.SAVE, clicks: totals.PIN_CLICK }),
+        note: published < earliest ? "Pinterest reports the last 90 days only, so these numbers leave out anything earlier." : undefined,
+      };
+    });
+  },
 };
 
 /** A pasted token with nothing to renew it is used as it is; a signed-in account is renewed when its 30 days are nearly up. */
@@ -124,6 +154,9 @@ const pinterestSession = <T extends object>(c: Credentials, ctx: Context, work: 
   c.refresh_token ? withSession("Pinterest", pinterestOAuth, c, ctx, work) : work(c);
 
 /* Reddit ------------------------------------------------------------------ */
+
+/** A score is upvotes less downvotes. Reddit does not give the two apart, or a view count. */
+const redditReports: Reports = { score: "Score", comments: "Comments" };
 
 export const reddit: Connector = {
   id: "reddit",
@@ -186,6 +219,20 @@ export const reddit: Connector = {
     }
     return { id: comment.name, url: comment.permalink ? `https://www.reddit.com${comment.permalink}` : undefined };
   },
+
+  reports: redditReports,
+  async metrics(input, c, ctx) {
+    const token = await redditToken(c, ctx);
+    const found = await call<{ data?: { children?: { data?: { name?: string; score?: number; num_comments?: number } }[] } }>(
+      ctx,
+      "Reddit",
+      `https://oauth.reddit.com/api/info?id=${encodeURIComponent(input.id)}&raw_json=1`,
+      { headers: { authorization: `Bearer ${token}`, "user-agent": agent(c) } },
+    );
+    const link = found.data?.children?.find((child) => child.data?.name === input.id)?.data;
+    if (!link) throw new PublishError("Reddit returned no post for this id. It may have been deleted.");
+    return { metrics: counted(redditReports, { score: link.score, comments: link.num_comments }) };
+  },
 };
 
 const agent = (c: Credentials) => `broadside/0.1 (by /u/${c.username})`;
@@ -204,6 +251,9 @@ async function redditToken(c: Credentials, ctx: Context): Promise<string> {
 }
 
 /* Dev.to ------------------------------------------------------------------ */
+
+/** DEV documents a reaction count on the list of your own articles. Comments and page views are not in that documented answer, so they are not read. */
+const devtoReports: Reports = { likes: "Reactions" };
 
 export const devto: Connector = {
   id: "devto",
@@ -241,9 +291,23 @@ export const devto: Connector = {
     );
     return { id: String(article.id), url: article.url };
   },
+
+  reports: devtoReports,
+  async metrics(input, c, ctx) {
+    // DEV has no documented answer for one article's counts, so the article is found in the list of your published ones.
+    for (let page = 1; page <= 5; page++) {
+      const listed = await call<{ id: number; public_reactions_count?: number }[]>(ctx, "DEV", `https://dev.to/api/articles/me/published?per_page=1000&page=${page}`, { headers: { "api-key": c.api_key } });
+      const article = Array.isArray(listed) ? listed.find((a) => String(a.id) === input.id) : undefined;
+      if (article) return { metrics: counted(devtoReports, { likes: article.public_reactions_count }) };
+      if (!Array.isArray(listed) || listed.length < 1000) break;
+    }
+    throw new PublishError("DEV did not list this article among your published ones. It may have been unpublished or deleted.");
+  },
 };
 
 /* Lemmy ------------------------------------------------------------------- */
+
+const lemmyReports: Reports = { likes: "Upvotes", score: "Score", comments: "Comments" };
 
 export const lemmy: Connector = {
   id: "lemmy",
@@ -298,6 +362,18 @@ export const lemmy: Connector = {
       json({ content: input.text, post_id: Number(input.root.id), parent_id: input.index > 1 ? Number(input.parent.id) : undefined }, { authorization: `Bearer ${jwt}` }),
     );
     return { id: String(made.comment_view.comment.id), url: `${base}/comment/${made.comment_view.comment.id}` };
+  },
+
+  reports: lemmyReports,
+  async metrics(input, c, ctx) {
+    const base = c.instance.replace(/\/+$/, "");
+    const jwt = await lemmyLogin(c, ctx);
+    const found = await call<{ post_view?: { counts?: { upvotes?: number; score?: number; comments?: number } } }>(ctx, "Lemmy", `${base}/api/v3/post?id=${encodeURIComponent(input.id)}`, {
+      headers: { authorization: `Bearer ${jwt}` },
+    });
+    const counts = found.post_view?.counts;
+    if (!counts) throw new PublishError("Lemmy returned no counts for this post.");
+    return { metrics: counted(lemmyReports, { likes: counts.upvotes, score: counts.score, comments: counts.comments }) };
   },
 };
 
@@ -372,6 +448,7 @@ export const nostr: Connector = {
     { key: "relays", label: "Relays", kind: "text", placeholder: "wss://relay.damus.io, wss://nos.lol" },
   ],
   limits: { maxChars: 100_000, count: "graphemes", maxImages: 10, maxVideos: 2, requiresMedia: false, pullsMedia: true },
+  noMetrics: "Nostr keeps no count for a note. Reactions and replies are separate notes spread across relays, and no relay holds them all.",
 
   async verify(c) {
     const key = npub(nostrSecret(c.private_key));
@@ -431,6 +508,8 @@ async function tiktokToken(c: Credentials, ctx: Context): Promise<Credentials> {
   return { ...c, access_token: fresh.access_token, refresh_token: fresh.refresh_token ?? c.refresh_token };
 }
 
+const tiktokReports: Reports = { views: "Views", likes: "Likes", comments: "Comments", shares: "Shares" };
+
 export const tiktok: Connector = {
   id: "tiktok",
   name: "TikTok",
@@ -441,17 +520,19 @@ export const tiktok: Connector = {
     "While the app is in sandbox, add your own TikTok account under Sandbox, Target users.",
     "Paste the client key and client secret here, then continue to TikTok and approve.",
     "Until TikTok audits your app, posts are private or arrive in your TikTok inbox as drafts.",
+    "Add the scope video.list to the app as well. It is what lets Broadside read a public post's views, likes, comments and shares. TikTok gives no numbers for a draft or a private post.",
   ],
   fields: [
     { key: "client_key", label: "Client key", kind: "text" },
     { key: "client_secret", label: "Client secret", kind: "secret" },
-    { key: "scopes", label: "Scopes", kind: "text", optional: true, placeholder: "user.info.basic,video.upload,video.publish", help: "Leave empty unless your app lacks one of these; then list only the ones it has." },
+    { key: "scopes", label: "Scopes", kind: "text", optional: true, placeholder: "user.info.basic,video.upload,video.publish,video.list", help: "Leave empty unless your app lacks one of these; then list only the ones it has. Without video.list, posts go out and their numbers are not read." },
     { key: "refresh_token", label: "Refresh token", kind: "secret", hidden: true },
   ],
   oauth: {
     authorizeUrl: "https://www.tiktok.com/v2/auth/authorize/",
     tokenUrl: "https://open.tiktokapis.com/v2/oauth/token/",
-    scopes: ["user.info.basic", "video.upload", "video.publish"],
+    // video.list is what lets a published post's numbers be read.
+    scopes: ["user.info.basic", "video.upload", "video.publish", "video.list"],
     scopeSeparator: ",",
     client: { id: "client_key", secret: "client_secret", param: "client_key" },
     // TikTok wants the challenge as the hex SHA-256 of the verifier, not the usual base64url.
@@ -529,6 +610,35 @@ export const tiktok: Connector = {
     }
     return { id: publishId, credentials: session };
   },
+
+  reports: tiktokReports,
+  async metrics(input, c, ctx): Promise<MetricsResult> {
+    const session = await tiktokToken(c, ctx);
+    const auth = { authorization: `Bearer ${session.access_token}`, "content-type": "application/json; charset=UTF-8" };
+    try {
+      // Broadside holds the id of the upload. TikTok gives the post's own id only once the post is public and has passed moderation.
+      const status = await callText(ctx, "TikTok", `${TT}/post/publish/status/fetch/`, { method: "POST", headers: auth, body: JSON.stringify({ publish_id: input.id }) });
+      // Post ids are longer than a JavaScript number holds, so they are read from the text as digits. The misspelt name is TikTok's own.
+      const videoId = status.match(/"publicaly_available_post_id"\s*:\s*\[([^\]]*)\]/)?.[1].match(/\d+/)?.[0];
+      if (!videoId) {
+        const inbox = /"status"\s*:\s*"SEND_TO_USER_INBOX"/.test(status);
+        throw new PublishError(inbox ? "This post is a draft in your TikTok inbox. TikTok reports numbers once you publish it there and it is public." : "TikTok has not made this post public, so it reports no numbers for it.");
+      }
+      const found = await call<{ data?: { videos?: { id?: string; view_count?: number; like_count?: number; comment_count?: number; share_count?: number }[] } }>(
+        ctx,
+        "TikTok",
+        `${TT}/video/query/?fields=id,like_count,comment_count,share_count,view_count`,
+        { method: "POST", headers: auth, body: JSON.stringify({ filters: { video_ids: [videoId] } }) },
+      ).catch((error) => withHint(error, "Reading numbers needs the scope video.list. If this account was connected without it, add the scope to your TikTok app and reconnect."));
+      const video = found.data?.videos?.find((v) => v.id === videoId);
+      if (!video) throw new PublishError("TikTok returned no video for this post.");
+      return { metrics: counted(tiktokReports, { views: video.view_count, likes: video.like_count, comments: video.comment_count, shares: video.share_count }), credentials: session };
+    } catch (error) {
+      // The refresh at the top may have replaced the refresh token, so the new one is kept however the reading went.
+      if (error instanceof PublishError) error.credentials = session;
+      throw error;
+    }
+  },
 };
 
 /* YouTube ----------------------------------------------------------------- */
@@ -558,6 +668,8 @@ const youtubeOAuth: OAuthSpec = {
     help: "Authorise your channel for the scope youtube.upload with offline access (the OAuth Playground works) and keep the refresh token.",
   },
 };
+
+const youtubeReports: Reports = { views: "Views", likes: "Likes", comments: "Comments" };
 
 export const youtube: Connector = {
   id: "youtube",
@@ -628,6 +740,21 @@ export const youtube: Connector = {
         body: bytes as BodyInit,
       });
       return { id: uploaded.id, url: `https://www.youtube.com/watch?v=${uploaded.id}` };
+    });
+  },
+
+  reports: youtubeReports,
+  async metrics(input, c, ctx) {
+    return withSession<MetricsResult>("YouTube", youtubeOAuth, c, ctx, async (live) => {
+      const found = await call<{ items?: { statistics?: { viewCount?: string; likeCount?: string; commentCount?: string } }[] }>(
+        ctx,
+        "YouTube",
+        `https://www.googleapis.com/youtube/v3/videos?part=statistics&id=${encodeURIComponent(input.id)}`,
+        { headers: { authorization: `Bearer ${live.access_token}` } },
+      ).catch((error) => withHint(error, "Reading numbers needs the scope youtube.readonly. If this channel was connected without it, reconnect it."));
+      const statistics = found.items?.[0]?.statistics;
+      if (!statistics) throw new PublishError("YouTube returned no video for this id. It may have been deleted.");
+      return { metrics: counted(youtubeReports, { views: statistics.viewCount, likes: statistics.likeCount, comments: statistics.commentCount }) };
     });
   },
 };

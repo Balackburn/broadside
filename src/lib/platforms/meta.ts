@@ -1,4 +1,4 @@
-import { blob, call, images, videos, PublishError, type Choice, type Connector, type Context, type MediaItem, type OAuthSpec, type TokenResponse } from "./types";
+import { blob, call, counted, images, videos, PublishError, withHint, type Choice, type Connector, type Context, type MediaItem, type OAuthSpec, type Reports, type TokenResponse } from "./types";
 
 const form = (params: Record<string, string | undefined>): RequestInit => {
   const body = new URLSearchParams();
@@ -29,7 +29,14 @@ async function ready(ctx: Context, network: string, url: string, field: string):
   throw new PublishError(`${network} was still processing the media after two minutes.`, true);
 }
 
+/** Meta's insights answer one entry per metric, each with a lifetime value. A metric Meta left out is left out here. */
+type Insights = { data?: { name: string; values?: { value?: unknown }[] }[] };
+const insight = (found: Insights, name: string): unknown => found.data?.find((entry) => entry.name === name)?.values?.[0]?.value;
+
 /* Threads ----------------------------------------------------------------- */
+
+/** Threads also reports shares, which it still marks as in development; they are not read. */
+const threadsReports: Reports = { views: "Views", likes: "Likes", comments: "Replies", shares: "Reposts", quotes: "Quotes" };
 
 const TH = "https://graph.threads.net/v1.0";
 
@@ -45,8 +52,8 @@ const TH = "https://graph.threads.net/v1.0";
 const threadsOAuth: OAuthSpec = {
   authorizeUrl: "https://threads.com/oauth/authorize",
   tokenUrl: "https://graph.threads.com/oauth/access_token",
-  // threads_manage_replies is what lets a thread's later parts go out as replies.
-  scopes: ["threads_basic", "threads_content_publish", "threads_manage_replies"],
+  // threads_manage_replies is what lets a thread's later parts go out as replies; threads_manage_insights is what lets a post's numbers be read.
+  scopes: ["threads_basic", "threads_content_publish", "threads_manage_replies", "threads_manage_insights"],
   scopeSeparator: ",",
   client: { id: "app_id", secret: "app_secret" },
   pkce: "none",
@@ -59,7 +66,7 @@ const threadsOAuth: OAuthSpec = {
   },
   paste: {
     required: ["access_token"],
-    help: "In the Threads use case's settings, open the User token generator and generate a token for your account. To post threads it also needs threads_manage_replies.",
+    help: "In the Threads use case's settings, open the User token generator and generate a token for your account. To post threads it also needs threads_manage_replies, and to read a post's numbers threads_manage_insights.",
   },
 };
 
@@ -68,7 +75,8 @@ export const threads: Connector = {
   name: "Threads",
   docsUrl: "https://developers.facebook.com/docs/threads/get-started",
   setup: [
-    "Create a Meta app with the Threads use case, with the permissions threads_basic, threads_content_publish and threads_manage_replies, and add your account as a Threads tester.",
+    "Create a Meta app with the Threads use case, with the permissions threads_basic, threads_content_publish, threads_manage_replies and threads_manage_insights, and add your account as a Threads tester.",
+    "threads_manage_insights is what lets Broadside read a post's views, likes, replies, reposts and quotes. Without it posts still go out and their numbers are not read.",
     "In the use case's settings, add the redirect address shown below under valid OAuth redirect URIs. Threads accepts only https addresses there, so signing in needs Broadside on an https address (set BROADSIDE_PUBLIC_URL).",
     "Paste the Threads app ID and Threads app secret from the same page, then continue to Threads and approve.",
     "On http://localhost, paste a token from the User token generator. Either way the token lasts 60 days and Broadside refreshes it each time it posts.",
@@ -152,6 +160,18 @@ export const threads: Connector = {
     ).catch(() => ({ permalink: undefined }));
     return { id: published.id, url: link.permalink };
   },
+
+  reports: threadsReports,
+  async metrics(input, c, ctx) {
+    const found = await call<Insights>(
+      ctx,
+      "Threads",
+      `${TH}/${encodeURIComponent(input.id)}/insights?metric=views,likes,replies,reposts,quotes&access_token=${encodeURIComponent(c.access_token)}`,
+    ).catch((error) => withHint(error, "Reading numbers needs the permission threads_manage_insights. If this account was connected without it, reconnect it."));
+    return {
+      metrics: counted(threadsReports, { views: insight(found, "views"), likes: insight(found, "likes"), comments: insight(found, "replies"), shares: insight(found, "reposts"), quotes: insight(found, "quotes") }),
+    };
+  },
 };
 
 /* Facebook Page ----------------------------------------------------------- */
@@ -208,6 +228,9 @@ async function pages(userToken: string, ctx: Context): Promise<Page[]> {
   return found.filter((page) => page.access_token);
 }
 
+/** Reactions of every type are counted together, as Facebook's own total does. */
+const facebookReports: Reports = { views: "Views", likes: "Reactions", comments: "Comments", shares: "Shares", clicks: "Clicks" };
+
 export const facebook: Connector = {
   id: "facebook",
   name: "Facebook Page",
@@ -217,6 +240,7 @@ export const facebook: Connector = {
     "In Facebook Login settings add the redirect address shown below under Valid OAuth Redirect URIs. An address on http://localhost needs no entry while the app is in development mode.",
     "Paste the App ID and App secret from App settings, Basic, then continue to Facebook, approve, and pick the Pages to connect.",
     "A Page stays connected: the Page token Broadside keeps does not expire.",
+    "read_insights is what lets Broadside read a post's views and clicks. Reactions, comments and shares are read with pages_read_engagement.",
   ],
   fields: [
     { key: "app_id", label: "App ID", kind: "text", optional: true },
@@ -225,8 +249,8 @@ export const facebook: Connector = {
     { key: "access_token", label: "Page access token", kind: "secret", hidden: true },
   ],
   oauth: {
-    // pages_manage_engagement is what lets a thread's later parts go out as comments.
-    ...facebookLogin(["pages_show_list", "pages_manage_posts", "pages_read_engagement", "pages_manage_engagement"]),
+    // pages_manage_engagement is what lets a thread's later parts go out as comments; read_insights is what lets a post's views and clicks be read.
+    ...facebookLogin(["pages_show_list", "pages_manage_posts", "pages_read_engagement", "pages_manage_engagement", "read_insights"]),
     choose: {
       prompt: "Pick the Pages to connect. Each becomes its own account.",
       multiple: true,
@@ -237,7 +261,7 @@ export const facebook: Connector = {
     },
     paste: {
       required: ["page_id", "access_token"],
-      help: "In the Graph API Explorer request pages_manage_posts, pages_read_engagement and pages_manage_engagement, exchange for a long-lived user token, and read the Page's id and Page access token from /me/accounts.",
+      help: "In the Graph API Explorer request pages_manage_posts, pages_read_engagement, pages_manage_engagement and read_insights, exchange for a long-lived user token, and read the Page's id and Page access token from /me/accounts.",
     },
   },
   limits: { maxChars: 63206, count: "graphemes", maxImages: 10, maxVideos: 0, requiresMedia: false, maxReplyChars: 8000 },
@@ -278,9 +302,36 @@ export const facebook: Connector = {
     const comment = await call<{ id: string }>(ctx, "Facebook", `${FB}/${input.root.id}/comments`, form({ message: input.text, access_token: c.access_token }));
     return { id: comment.id };
   },
+
+  reports: facebookReports,
+  async metrics(input, c, ctx) {
+    const token = encodeURIComponent(c.access_token);
+    const id = encodeURIComponent(input.id);
+    // The totals of the post's reactions and comments, without the lists of who made them.
+    const post = await call<{ shares?: { count?: number }; reactions?: { summary?: { total_count?: number } }; comments?: { summary?: { total_count?: number } } }>(
+      ctx,
+      "Facebook",
+      `${FB}/${id}?fields=shares,reactions.summary(total_count).limit(0),comments.summary(true).limit(0)&access_token=${token}`,
+    );
+    // Facebook leaves `shares` out of a post nobody has shared.
+    const engagement = { likes: post.reactions?.summary?.total_count, comments: post.comments?.summary?.total_count, shares: post.shares?.count ?? 0 };
+    try {
+      const found = await call<Insights>(ctx, "Facebook", `${FB}/${id}/insights?metric=post_media_view,post_clicks&access_token=${token}`);
+      return { metrics: counted(facebookReports, { ...engagement, views: insight(found, "post_media_view"), clicks: insight(found, "post_clicks") }) };
+    } catch (error) {
+      // Insights sit behind their own permission. A Page connected without it still has its reactions, comments and shares.
+      if (!(error instanceof PublishError) || (error.status !== 400 && error.status !== 403)) throw error;
+      return {
+        metrics: counted(facebookReports, engagement),
+        note: `Views and clicks were not read. ${error.message} They need the permission read_insights. If this Page was connected without it, reconnect it.`,
+      };
+    }
+  },
 };
 
 /* Instagram --------------------------------------------------------------- */
+
+const instagramReports: Reports = { views: "Views", likes: "Likes", comments: "Comments", shares: "Shares", saves: "Saves" };
 
 export const instagram: Connector = {
   id: "instagram",
@@ -291,6 +342,7 @@ export const instagram: Connector = {
     "Create a Meta app with Facebook Login and the Instagram permissions, and keep it in development mode unless Meta has reviewed it.",
     "In Facebook Login settings add the redirect address shown below under Valid OAuth Redirect URIs. An address on http://localhost needs no entry while the app is in development mode.",
     "Paste the App ID and App secret from App settings, Basic, then continue to Facebook, approve, and pick the Instagram accounts to connect.",
+    "instagram_manage_insights is what lets Broadside read a post's views, likes, comments, shares and saves. Instagram can take up to 48 hours to report them.",
   ],
   fields: [
     { key: "app_id", label: "App ID", kind: "text", optional: true },
@@ -299,8 +351,8 @@ export const instagram: Connector = {
     { key: "access_token", label: "Access token", kind: "secret", hidden: true },
   ],
   oauth: {
-    // instagram_manage_comments is what lets a thread's later parts go out as comments. The Page permissions are how Facebook finds the account.
-    ...facebookLogin(["instagram_basic", "instagram_content_publish", "instagram_manage_comments", "pages_show_list", "pages_read_engagement"]),
+    // instagram_manage_comments is what lets a thread's later parts go out as comments, and instagram_manage_insights what lets a post's numbers be read. The Page permissions are how Facebook finds the account.
+    ...facebookLogin(["instagram_basic", "instagram_content_publish", "instagram_manage_comments", "instagram_manage_insights", "pages_show_list", "pages_read_engagement"]),
     choose: {
       prompt: "Pick the Instagram accounts to connect. Each becomes its own account.",
       multiple: true,
@@ -322,7 +374,7 @@ export const instagram: Connector = {
     },
     paste: {
       required: ["ig_user_id", "access_token"],
-      help: "Request instagram_basic, instagram_content_publish and instagram_manage_comments for someone who manages the linked Page. The account id is in /{page-id}?fields=instagram_business_account.",
+      help: "Request instagram_basic, instagram_content_publish, instagram_manage_comments and instagram_manage_insights for someone who manages the linked Page. The account id is in /{page-id}?fields=instagram_business_account.",
     },
   },
   limits: { maxChars: 2200, count: "graphemes", maxImages: 10, maxVideos: 1, requiresMedia: true, pullsMedia: true },
@@ -373,5 +425,17 @@ export const instagram: Connector = {
   async reply(input, c, ctx) {
     const comment = await call<{ id: string }>(ctx, "Instagram", `${FB}/${input.root.id}/comments`, form({ message: input.text, access_token: c.access_token }));
     return { id: comment.id };
+  },
+
+  reports: instagramReports,
+  async metrics(input, c, ctx) {
+    const found = await call<Insights>(
+      ctx,
+      "Instagram",
+      `${FB}/${encodeURIComponent(input.id)}/insights?metric=views,likes,comments,shares,saved&access_token=${encodeURIComponent(c.access_token)}`,
+    ).catch((error) => withHint(error, "Reading numbers needs the permission instagram_manage_insights. If this account was connected without it, reconnect it."));
+    return {
+      metrics: counted(instagramReports, { views: insight(found, "views"), likes: insight(found, "likes"), comments: insight(found, "comments"), shares: insight(found, "shares"), saves: insight(found, "saved") }),
+    };
   },
 };

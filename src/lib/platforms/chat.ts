@@ -1,5 +1,5 @@
 import { createHmac } from "node:crypto";
-import { blob, call, json, PublishError, type Connector, type Credentials } from "./types";
+import { blob, call, counted, json, PublishError, type Connector, type Credentials, type Reports } from "./types";
 
 /* Telegram ---------------------------------------------------------------- */
 
@@ -25,6 +25,7 @@ export const telegram: Connector = {
   ],
   options: [{ key: "silent", label: "Send without sound", kind: "boolean" }],
   limits: { maxChars: 4096, count: "graphemes", maxImages: 10, maxVideos: 1, requiresMedia: false },
+  noMetrics: "Telegram's Bot API has no way to ask for a message's views or reactions.",
 
   async verify(c, ctx) {
     await call<TgResult<unknown>>(ctx, "Telegram", tg(c, "getMe"));
@@ -90,6 +91,9 @@ export const telegram: Connector = {
 
 /* Discord ----------------------------------------------------------------- */
 
+/** Reactions of every emoji, counted together. Discord has no view count. */
+const discordReports: Reports = { likes: "Reactions" };
+
 export const discord: Connector = {
   id: "discord",
   name: "Discord",
@@ -124,6 +128,18 @@ export const discord: Connector = {
       url: c.guild_id ? `https://discord.com/channels/${c.guild_id}/${message.channel_id}/${message.id}` : undefined,
     };
   },
+
+  reports: discordReports,
+  async metrics(input, c, ctx) {
+    // A webhook may read back a message it sent, at its own address.
+    const url = new URL(c.webhook_url);
+    url.pathname = `${url.pathname.replace(/\/+$/, "")}/messages/${encodeURIComponent(input.id)}`;
+    url.searchParams.delete("wait");
+    const message = await call<{ id?: string; reactions?: { count?: number }[] }>(ctx, "Discord", url.toString());
+    if (!message.id) throw new PublishError("Discord returned no message for this id.");
+    // Discord leaves `reactions` out of a message nobody has reacted to.
+    return { metrics: counted(discordReports, { likes: (message.reactions ?? []).reduce((sum, reaction) => sum + (reaction.count ?? 0), 0) }) };
+  },
 };
 
 /* Slack ------------------------------------------------------------------- */
@@ -142,6 +158,7 @@ export const slack: Connector = {
   ],
   limits: { maxChars: 3000, count: "graphemes", maxImages: 4, maxVideos: 0, requiresMedia: false, pullsMedia: true },
   noThread: "Slack cannot post a thread from an incoming webhook.",
+  noMetrics: "A Slack incoming webhook can post a message and cannot read anything back.",
 
   async verify(c) {
     if (!/^https:\/\/hooks\.slack\.com\//.test(c.webhook_url) && !process.env.BROADSIDE_ALLOW_ANY_WEBHOOK) {
@@ -176,6 +193,7 @@ export const webhook: Connector = {
     { key: "secret", label: "Signing secret", kind: "secret", optional: true, help: "Sent as an HMAC-SHA256 of the body in x-broadside-signature." },
   ],
   limits: { maxChars: 100_000, count: "graphemes", maxImages: 20, maxVideos: 5, requiresMedia: false, pullsMedia: true },
+  noMetrics: "A webhook receives the post and reports nothing back about it.",
 
   async verify(c) {
     new URL(c.url);
@@ -206,6 +224,7 @@ export const sandbox: Connector = {
   setup: ["Nothing to set up. Posts sent here are recorded in Broadside and go nowhere else."],
   fields: [{ key: "name", label: "Name", kind: "text", placeholder: "Rehearsal" }],
   limits: { maxChars: 5000, count: "graphemes", maxImages: 10, maxVideos: 2, requiresMedia: false },
+  noMetrics: "The sandbox publishes nowhere, so there is nothing to count.",
   async verify(c) {
     return { handle: c.name || "Rehearsal" };
   },

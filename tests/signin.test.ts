@@ -389,10 +389,10 @@ describe("Threads", () => {
     expect(() => startOAuth("threads", app, LOCAL)).toThrow("Threads only accepts an https redirect address, and this Broadside is at http://localhost:3000. Set BROADSIDE_PUBLIC_URL to an https address to sign in, or connect by pasting a token.");
   });
 
-  it("sends the browser to Threads for the scopes that post and reply", () => {
+  it("sends the browser to Threads for the scopes that post, reply and read a post's numbers", () => {
     const { address, params } = begin("threads", app, HOSTED);
     expect(address).toBe("https://threads.com/oauth/authorize");
-    expect(params).toEqual({ client_id: "tid", response_type: "code", scope: "threads_basic,threads_content_publish,threads_manage_replies", redirect_uri: "https://post.example.com/oauth/threads/callback", state: STATE });
+    expect(params).toEqual({ client_id: "tid", response_type: "code", scope: "threads_basic,threads_content_publish,threads_manage_replies,threads_manage_insights", redirect_uri: "https://post.example.com/oauth/threads/callback", state: STATE });
   });
 
   it("exchanges the code, trades the short token for a long-lived one with the secret in the body, and stores only that", async () => {
@@ -450,10 +450,10 @@ describe("Facebook Pages", () => {
     { id: "222", name: "Bindery", access_token: "page-token-222", tasks: ["CREATE_CONTENT"] },
   ];
 
-  it("sends the browser to Facebook for the Page scopes, using localhost as the name of this machine", () => {
+  it("sends the browser to Facebook for the Page scopes, with read_insights for a post's numbers, using localhost as the name of this machine", () => {
     const { address, params } = begin("facebook", app, "http://127.0.0.1:3000");
     expect(address).toBe("https://www.facebook.com/v27.0/dialog/oauth");
-    expect(params).toEqual({ client_id: "fid", response_type: "code", scope: "pages_show_list,pages_manage_posts,pages_read_engagement,pages_manage_engagement", redirect_uri: "http://localhost:3000/oauth/facebook/callback", state: STATE });
+    expect(params).toEqual({ client_id: "fid", response_type: "code", scope: "pages_show_list,pages_manage_posts,pages_read_engagement,pages_manage_engagement,read_insights", redirect_uri: "http://localhost:3000/oauth/facebook/callback", state: STATE });
   });
 
   it("exchanges the code, trades for a long-lived user token, and offers the Pages without connecting any", async () => {
@@ -556,10 +556,10 @@ describe("Instagram", () => {
       return account ? { username: account.username } : {};
     });
 
-  it("sends the browser to Facebook for the Instagram scopes", () => {
+  it("sends the browser to Facebook for the Instagram scopes, with instagram_manage_insights for a post's numbers", () => {
     const { address, params } = begin("instagram", app);
     expect(address).toBe("https://www.facebook.com/v27.0/dialog/oauth");
-    expect(params).toEqual({ client_id: "iid", response_type: "code", scope: "instagram_basic,instagram_content_publish,instagram_manage_comments,pages_show_list,pages_read_engagement", redirect_uri: "http://localhost:3000/oauth/instagram/callback", state: STATE });
+    expect(params).toEqual({ client_id: "iid", response_type: "code", scope: "instagram_basic,instagram_content_publish,instagram_manage_comments,instagram_manage_insights,pages_show_list,pages_read_engagement", redirect_uri: "http://localhost:3000/oauth/instagram/callback", state: STATE });
   });
 
   it("finds the Instagram account behind each Page, offers those, and connects the ones picked with their Page's token", async () => {
@@ -702,10 +702,10 @@ describe("Pinterest", () => {
       return { id: "pin-77" };
     });
 
-  it("sends the browser to Pinterest for the scopes that read boards and write pins", () => {
+  it("sends the browser to Pinterest for the scopes that read boards, write pins and read a pin's numbers", () => {
     const { address, params } = begin("pinterest", app);
     expect(address).toBe("https://www.pinterest.com/oauth/");
-    expect(params).toEqual({ client_id: "pid", response_type: "code", scope: "boards:read,pins:write,user_accounts:read", redirect_uri: "http://localhost:3000/oauth/pinterest/callback", state: STATE });
+    expect(params).toEqual({ client_id: "pid", response_type: "code", scope: "boards:read,pins:read,pins:write,user_accounts:read", redirect_uri: "http://localhost:3000/oauth/pinterest/callback", state: STATE });
   });
 
   it("exchanges the code with a Basic header, lists every board, and connects the one picked", async () => {

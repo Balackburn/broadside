@@ -4,7 +4,7 @@ import { linkedin } from "./linkedin";
 import { mastodon } from "./mastodon";
 import { facebook, instagram, threads } from "./meta";
 import { devto, lemmy, nostr, pinterest, reddit, tiktok, youtube } from "./more";
-import type { Connector } from "./types";
+import { METRIC_KINDS, type Connector } from "./types";
 import { x } from "./x";
 
 /** Every network Broadside can post to, in the order the UI lists them. */
@@ -37,6 +37,12 @@ export { measure, problems, threadProblems, type MediaShape } from "./measure";
 /** What the length and thread rules need to know about a network. */
 export const fits = (c: Connector) => ({ name: c.name, limits: c.limits, threads: Boolean(c.reply), noThread: c.noThread });
 
+/** Why a network has no numbers to read. Every connector without `metrics` gives its own reason; this is the fallback. */
+export const noMetrics = (c: Connector): string => c.noMetrics ?? `${c.name} reports no numbers for a post.`;
+
+/** The counts a network reports, in a fixed order, each under the network's own word for it. */
+export const reported = (c: Connector) => (c.metrics ? METRIC_KINDS.flatMap((kind) => (c.reports?.[kind] ? [{ kind, label: c.reports[kind]! }] : [])) : []);
+
 /** What the UI and agents need to know about a network, without its code. */
 export function describe(c: Connector) {
   const spec = c.oauth;
@@ -57,6 +63,8 @@ export function describe(c: Connector) {
     limits: c.limits,
     // True when a post to this network may carry a thread (extra parts published as replies or comments).
     threads: Boolean(c.reply),
+    // Whether Broadside can read a published post's numbers from this network, which counts it reports, or why it has none.
+    metrics: c.metrics ? { available: true, reports: reported(c), reason: null } : { available: false, reports: [], reason: noMetrics(c) },
     // Present when the network connects by signing in.
     oauth: spec
       ? {
