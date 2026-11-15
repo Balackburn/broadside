@@ -376,6 +376,7 @@
     border-radius: 4px;
     font-size: 14px;
     font-weight: 500;
+    white-space: nowrap;
     color: var(--ink-2);
     cursor: pointer;
     transition:
@@ -667,6 +668,15 @@
   }
   .row:active {
     transform: scale(0.995);
+  }
+
+  /* A row of tabs wider than a phone scrolls sideways without drawing a scrollbar under it. */
+  .scroll-quiet {
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .scroll-quiet::-webkit-scrollbar {
+    display: none;
   }
 
   /* Skip link: first stop for a keyboard, invisible until focused. */

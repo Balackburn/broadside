@@ -309,6 +309,16 @@ try {
     const html = await response.text();
     ok(response.status === 200 && html.includes(marker), `Page ${pathname} renders`, `status ${response.status}`);
   }
+  // Editing a saved post in the app
+  const toEdit = await api("/api/v1/posts", { method: "POST", headers: auth, body: JSON.stringify({ content: "editable in the app", targets: [{ account_id: ids.sandbox }, { account_id: ids.mastodon, content_override: "mastodon wording" }], publish_at: new Date(Date.now() + 3600000).toISOString() }) });
+  const editPage = await fetch(`${base}/app?edit=${toEdit.body.data.id}`).then((r) => r.text());
+  ok(editPage.includes("Edit post") && editPage.includes("editable in the app") && editPage.includes("mastodon wording"), "The composer opens a scheduled post for editing, with its per-account version");
+  const sentPage = await fetch(`${base}/app?edit=${posted.id}`).then((r) => r.text());
+  ok(sentPage.includes("Compose") && !sentPage.includes("Edit post"), "A post that already went out cannot be opened for editing");
+  const saved = await api(`/api/v1/posts/${toEdit.body.data.id}`, { method: "PATCH", headers: ui, body: JSON.stringify({ content: "edited in the app", targets: [{ account_id: ids.sandbox }], media_ids: [], publish_at: null, draft: false }) });
+  ok(saved.status === 200 && saved.body.data.status === "published" && saved.body.data.content === "edited in the app" && saved.body.data.targets.length === 1, "Saving the edit as Now publishes the changed post to the chosen accounts only");
+  ok(!JSON.stringify(health).includes("accounts"), "The public health check reveals nothing about the install");
+
   const posts = await fetch(`${base}/app/posts`).then((r) => r.text());
   ok(posts.includes("Broadside verify: one post, every network."), "The posts page shows what was published");
 

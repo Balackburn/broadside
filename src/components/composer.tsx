@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { useMemo, useRef, useState } from "react";
 import { measure, problems } from "@/lib/platforms/measure";
 import type { Limits } from "@/lib/platforms/types";
-import { api, Icon, Stamp, Status, Tabs, useToast, when } from "./ui";
+import { api, Icon, Stamp, Status, Tabs, useHydrated, useToast, when } from "./ui";
 
 export type ComposerAccount = { id: string; platform: string; name: string; handle: string; limits: Limits };
 type Media = { id: string; type: "image" | "video"; url: string; public_url: string | null; filename: string; alt: string | null };
@@ -13,17 +13,32 @@ type Target = { id: string; account_id: string; platform: string; handle: string
 type Post = { id: string; status: string; publish_at: string | null; targets: Target[] };
 type Mode = "now" | "later" | "draft";
 
+/** A draft or scheduled post opened for editing. */
+export type ComposerInitial = {
+  id: string;
+  content: string;
+  publish_at: string | null;
+  draft: boolean;
+  targets: { account_id: string; content_override: string | null }[];
+  media: Media[];
+};
+
 const localInput = (date: Date) => new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
 
-export function Composer({ accounts }: { accounts: ComposerAccount[] }) {
+export function Composer({ accounts, initial }: { accounts: ComposerAccount[]; initial?: ComposerInitial }) {
   const router = useRouter();
+  const hydrated = useHydrated();
   const { show, toast } = useToast();
-  const [text, setText] = useState("");
-  const [selected, setSelected] = useState<string[]>(() => accounts.map((a) => a.id));
-  const [overrides, setOverrides] = useState<Record<string, string>>({});
-  const [media, setMedia] = useState<Media[]>([]);
-  const [mode, setMode] = useState<Mode>("now");
-  const [at, setAt] = useState(() => localInput(new Date(Date.now() + 3600_000)));
+  const [text, setText] = useState(initial?.content ?? "");
+  const [selected, setSelected] = useState<string[]>(() =>
+    initial ? initial.targets.map((t) => t.account_id).filter((id) => accounts.some((a) => a.id === id)) : accounts.map((a) => a.id),
+  );
+  const [overrides, setOverrides] = useState<Record<string, string>>(() =>
+    Object.fromEntries((initial?.targets ?? []).flatMap((t) => (t.content_override === null ? [] : [[t.account_id, t.content_override]]))),
+  );
+  const [media, setMedia] = useState<Media[]>(initial?.media ?? []);
+  const [mode, setMode] = useState<Mode>(initial ? (initial.draft ? "draft" : initial.publish_at ? "later" : "now") : "now");
+  const [at, setAt] = useState(() => localInput(initial?.publish_at ? new Date(initial.publish_at) : new Date(Date.now() + 3600_000)));
   const [busy, setBusy] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [result, setResult] = useState<Post | null>(null);
@@ -69,13 +84,14 @@ export function Composer({ accounts }: { accounts: ComposerAccount[] }) {
     }
     setBusy(true);
     try {
-      const post = await api<Post>("/posts", {
-        method: "POST",
+      // Editing replaces the saved post in place; a new post is created otherwise.
+      const post = await api<Post>(initial ? `/posts/${initial.id}` : "/posts", {
+        method: initial ? "PATCH" : "POST",
         body: JSON.stringify({
           content: text,
           targets: chosen.map((a) => ({ account_id: a.id, content_override: overrides[a.id] ?? undefined })),
           media_ids: media.map((m) => m.id),
-          publish_at: mode === "later" ? new Date(at).toISOString() : undefined,
+          publish_at: mode === "later" ? new Date(at).toISOString() : initial ? null : undefined,
           draft: mode === "draft",
         }),
       });
@@ -89,6 +105,7 @@ export function Composer({ accounts }: { accounts: ComposerAccount[] }) {
   }
 
   function reset() {
+    if (initial) return router.replace("/app");
     setResult(null);
     setText("");
     setOverrides({});
@@ -138,12 +155,12 @@ export function Composer({ accounts }: { accounts: ComposerAccount[] }) {
   }
 
   const count = chosen.length;
-  const action = busy ? "Sending" : mode === "draft" ? "Save draft" : mode === "later" ? `Schedule for ${count} account${count === 1 ? "" : "s"}` : `Publish to ${count} account${count === 1 ? "" : "s"}`;
+  const action = busy ? (mode === "now" ? "Sending" : "Saving") : mode === "draft" ? "Save draft" : mode === "later" ? `Schedule for ${count} account${count === 1 ? "" : "s"}` : `Publish to ${count} account${count === 1 ? "" : "s"}`;
 
   return (
     <div className="grid gap-8 xl:grid-cols-[minmax(0,6fr)_minmax(0,5fr)]">
       <section aria-label="Write the post">
-        <h1 className="heading text-4xl">Compose</h1>
+        <h1 className="heading text-4xl">{initial ? "Edit post" : "Compose"}</h1>
         <div className="mt-6">
           <p className="label">Post to</p>
           <div className="flex flex-wrap gap-2">
@@ -215,7 +232,8 @@ export function Composer({ accounts }: { accounts: ComposerAccount[] }) {
               ]}
             />
           </div>
-          {mode === "later" ? (
+          {/* The time field is in the reader's zone, which only the browser knows, so it appears after hydration. */}
+          {mode === "later" && hydrated ? (
             <div>
               <label className="label" htmlFor="post-at">
                 Date and time

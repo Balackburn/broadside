@@ -128,7 +128,7 @@ export function KeysPanel({ keys, base, cwd }: { keys: Key[]; base: string; cwd:
 
         <section aria-label="Client setup">
           <h2 className="title text-2xl">Set up a client</h2>
-          <div className="mt-4 max-w-full overflow-x-auto">
+          <div className="scroll-quiet mt-4 max-w-full">
             <Tabs
               label="Client"
               value={client}

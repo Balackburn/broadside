@@ -47,7 +47,7 @@ export function PostsList({ posts, focus }: { posts: Post[]; focus?: string }) {
     <div>
       <div className="flex flex-wrap items-end justify-between gap-4">
         <h1 className="heading text-4xl">Posts</h1>
-        <div className="max-w-full overflow-x-auto">
+        <div className="scroll-quiet max-w-full">
           <Tabs label="Filter posts" value={filter} onChange={setFilter} options={FILTERS} />
         </div>
       </div>
@@ -87,7 +87,7 @@ export function PostsList({ posts, focus }: { posts: Post[]; focus?: string }) {
                       </span>
                     ))}
                   </span>
-                  <span className="w-36 flex-none text-right">
+                  <span className="flex-none text-right sm:w-36">
                     <Status status={post.status} />
                   </span>
                 </button>
@@ -122,7 +122,12 @@ export function PostsList({ posts, focus }: { posts: Post[]; focus?: string }) {
                     </ul>
                     <div className="mt-3 flex flex-wrap gap-2">
                       {editable ? (
-                        <button type="button" className="btn btn-sm" disabled={busy === post.id} onClick={() => act(post.id, `/posts/${post.id}/publish`, "POST", "Published.")}>
+                        <Link className="btn btn-sm" href={`/app?edit=${post.id}`}>
+                          Edit
+                        </Link>
+                      ) : null}
+                      {editable ? (
+                        <button type="button" className="btn btn-quiet btn-sm" disabled={busy === post.id} onClick={() => act(post.id, `/posts/${post.id}/publish`, "POST", "Published.")}>
                           Publish now
                         </button>
                       ) : null}

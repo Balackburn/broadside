@@ -3,7 +3,8 @@ import { VERSION } from "@/lib/mcp";
 
 export const dynamic = "force-dynamic";
 
+/** Liveness for monitors and containers. It proves the database opens and says nothing about what is in it. */
 export function GET() {
-  const { n } = get<{ n: number }>("SELECT COUNT(*) AS n FROM accounts")!;
-  return Response.json({ ok: true, name: "broadside", version: VERSION, accounts: n });
+  get("SELECT 1 AS ok");
+  return Response.json({ ok: true, name: "broadside", version: VERSION });
 }
