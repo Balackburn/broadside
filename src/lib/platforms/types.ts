@@ -201,13 +201,21 @@ export type Limits = {
   maxReplyChars?: number;
 };
 
+/**
+ * One setting a post may carry for a single account on this network. Left
+ * out, the connector's default applies.
+ */
 export type OptionSpec = {
   key: string;
   label: string;
   kind: "text" | "select" | "boolean";
+  /** What a select offers. The first is the one the connector uses when the option is not set. */
   choices?: string[];
   help?: string;
 };
+
+/** What a connector's notice says instead while an option holds a value, such as nothing being sent while a campaign is a draft. */
+export type NoticeWhen = { option: string; is: string; notice: string };
 
 export type Connector = {
   id: string;
@@ -217,6 +225,20 @@ export type Connector = {
   docsUrl: string;
   fields: CredentialField[];
   options?: OptionSpec[];
+  /**
+   * The destination's own word for the title a post here must have: "title",
+   * or "subject" for an email. Set where a post without one is refused. The
+   * title is the option keyed `title` when the target sets it, otherwise the
+   * first line of the text.
+   */
+  needsTitle?: string;
+  /**
+   * What publishing here does that cannot be taken back, in a sentence or
+   * two. Shown beside the account wherever a post to it is being written.
+   */
+  notice?: string;
+  /** What the notice says instead while an option holds a value. The first that matches is used. */
+  noticeWhen?: NoticeWhen[];
   oauth?: OAuthSpec;
   limits: Limits;
   verify: (credentials: Credentials, ctx: Context) => Promise<Profile>;

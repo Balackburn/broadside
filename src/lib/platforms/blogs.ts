@@ -1,5 +1,5 @@
 import { createHmac } from "node:crypto";
-import { titleAndBody } from "./more";
+import { missingTitle, titleAndBody } from "./options";
 import { blob, call, counted, images, json, PublishError, type Connector, type Context, type Credentials, type MediaItem, type PublishInput, type Reports } from "./types";
 
 /**
@@ -49,11 +49,11 @@ export function textToHtml(text: string): string {
 
 const figure = (image: { url: string; alt?: string }): string => `<figure><img src="${escapeHtml(image.url)}" alt="${escapeHtml(image.alt ?? "")}"></figure>`;
 
-/** The title and body of an article. `what` is the site's own word for the title, which is also what its option is called. */
-function titled(network: string, input: PublishInput, what = "title"): { title: string; body: string } {
-  const { title, body } = titleAndBody(input.text, input.options, Infinity);
-  if (!title) throw new PublishError(`${network} needs a ${what}. Write it as the first line of the post, or set the ${what[0].toUpperCase()}${what.slice(1)} option for this account.`);
-  return { title, body };
+/** The title and body of an article. A post with no title is refused in the words the composer and the dry run show before it is sent. */
+function titled(c: Connector, input: PublishInput): { title: string; body: string } {
+  const missing = missingTitle(c, input.text, input.options);
+  if (missing) throw new PublishError(missing);
+  return titleAndBody(input.text, input.options, Infinity);
 }
 
 const trimmed = (address: string): string => address.trim().replace(/\/+$/, "");
@@ -108,6 +108,7 @@ export const wordpress: Connector = {
     { key: "title", label: "Title", kind: "text", help: "Leave empty to use the first line of the post." },
     { key: "status", label: "Publish as", kind: "select", choices: WP_STATUSES, help: "publish puts it on the site at once. draft and pending leave it in wp-admin." },
   ],
+  needsTitle: "title",
   limits: { maxChars: 100_000, count: "graphemes", maxImages: 10, maxVideos: 0, requiresMedia: false },
   noThread: "WordPress publishes one article and has nothing to reply to it with.",
   noMetrics: "WordPress's REST API holds no count of views or likes for an article.",
@@ -118,7 +119,7 @@ export const wordpress: Connector = {
   },
 
   async publish(input, c, ctx) {
-    const { title, body } = titled("WordPress", input);
+    const { title, body } = titled(wordpress, input);
     const uploaded: { id: number; url: string; alt?: string }[] = [];
     for (const image of images(input)) {
       const form = new FormData();
@@ -197,6 +198,7 @@ export const ghost: Connector = {
     { key: "status", label: "Publish as", kind: "select", choices: GHOST_STATUSES, help: "draft leaves it in Ghost Admin to finish there." },
     { key: "tags", label: "Tags, comma separated", kind: "text", help: "A tag Ghost does not have yet is created." },
   ],
+  needsTitle: "title",
   limits: { maxChars: 100_000, count: "graphemes", maxImages: 10, maxVideos: 0, requiresMedia: false },
   noThread: "Ghost publishes one article and has nothing to reply to it with.",
   noMetrics: "Ghost's Admin API documents no count of views or likes for an article.",
@@ -209,7 +211,7 @@ export const ghost: Connector = {
   },
 
   async publish(input, c, ctx) {
-    const { title, body } = titled("Ghost", input);
+    const { title, body } = titled(ghost, input);
     const uploaded: { url: string; alt?: string }[] = [];
     for (const image of images(input)) {
       const form = new FormData();
@@ -291,7 +293,7 @@ export const listmonk: Connector = {
     "In Listmonk open Admin, Users and create an API user with a role that may manage campaigns, get lists and upload media. Copy its token.",
     "Paste the address of your Listmonk, that user's name and its token, and the lists to send to.",
     "A post becomes a campaign and is sent to those lists at once. The first line is the email's subject and the rest is the email.",
-    "The composer has no switch for a draft. Through the API or an agent, a target with the option status set to draft makes the campaign in Listmonk and sends nothing.",
+    "To look at a campaign before it goes, set Campaign to draft for this account in the composer, or the option status to draft through the API or an agent. The campaign is then made in Listmonk and nothing is sent.",
   ],
   fields: [
     { key: "url", label: "Listmonk address", kind: "url", placeholder: "https://newsletter.example.com" },
@@ -304,6 +306,9 @@ export const listmonk: Connector = {
     { key: "title", label: "Subject", kind: "text", help: "Leave empty to use the first line of the post." },
     { key: "status", label: "Campaign", kind: "select", choices: LISTMONK_MODES, help: "send starts the campaign at once. draft makes it in Listmonk and sends nothing." },
   ],
+  needsTitle: "subject",
+  notice: "Publishing emails every subscriber of the chosen lists at once, and an email cannot be unsent. Choose Campaign: draft to make it in Listmonk without sending.",
+  noticeWhen: [{ option: "status", is: "draft", notice: "Campaign is set to draft. The campaign is made in Listmonk and nothing is sent until you start it there." }],
   limits: { maxChars: 100_000, count: "graphemes", maxImages: 10, maxVideos: 0, requiresMedia: false },
   noThread: "Listmonk sends one email and has nothing to reply to it with.",
 
@@ -321,7 +326,7 @@ export const listmonk: Connector = {
   },
 
   async publish(input, c, ctx) {
-    const { title, body } = titled("Listmonk", input, "subject");
+    const { title, body } = titled(listmonk, input);
     const lists = listed(c.list_ids).map(Number);
     if (!lists.length) throw new PublishError("This Listmonk account has no lists to send to. Reconnect it and name them.");
     const pictures: { url: string; alt?: string }[] = [];

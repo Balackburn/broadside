@@ -3,15 +3,11 @@ import { schnorr } from "@noble/curves/secp256k1.js";
 import { bech32 } from "@scure/base";
 import { assertPublicUrl } from "../net";
 import { tokenFields, withSession } from "./oauth2";
+import { titleAndBody } from "./options";
 import { call, callText, counted, images, json, videos, PublishError, withHint, type Choice, type Connector, type Context, type Credentials, type MetricsResult, type OAuthSpec, type Reports } from "./types";
 
-/** The first line of a post doubles as its title on networks that want one. */
-export function titleAndBody(text: string, options: Record<string, unknown>, max: number): { title: string; body: string } {
-  const given = typeof options.title === "string" && options.title.trim();
-  if (given) return { title: given.slice(0, max), body: text };
-  const [first, ...rest] = text.split("\n");
-  return { title: first.trim().slice(0, max), body: rest.join("\n").trim() };
-}
+// The rule for a title lives with the other option rules, where the browser can read it too.
+export { titleAndBody };
 
 const formBody = (params: Record<string, string>): URLSearchParams => new URLSearchParams(params);
 
@@ -447,6 +443,8 @@ export const nostr: Connector = {
     { key: "private_key", label: "Private key", kind: "secret", placeholder: "nsec1…" },
     { key: "relays", label: "Relays", kind: "text", placeholder: "wss://relay.damus.io, wss://nos.lol" },
   ],
+  // NIP-09 lets an author ask relays to delete a note and leaves each relay free to keep it.
+  notice: "A note goes to every relay listed and is copied on from there. Relays can be asked to delete it later and are free to keep it, so treat a note as permanent.",
   limits: { maxChars: 100_000, count: "graphemes", maxImages: 10, maxVideos: 2, requiresMedia: false, pullsMedia: true },
   noMetrics: "Nostr keeps no count for a note. Reactions and replies are separate notes spread across relays, and no relay holds them all.",
 

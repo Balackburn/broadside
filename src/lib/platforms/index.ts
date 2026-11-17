@@ -42,9 +42,19 @@ export const connectors: Connector[] = [
 export const connector = (id: string): Connector | undefined => connectors.find((c) => c.id === id);
 
 export { measure, problems, threadProblems, type MediaShape } from "./measure";
+export { optionProblems } from "./options";
 
-/** What the length and thread rules need to know about a network. */
-export const fits = (c: Connector) => ({ name: c.name, limits: c.limits, threads: Boolean(c.reply), noThread: c.noThread });
+/** What the length, thread and option rules need to know about a network. All of it is safe to hand to the browser. */
+export const fits = (c: Connector) => ({
+  name: c.name,
+  limits: c.limits,
+  threads: Boolean(c.reply),
+  noThread: c.noThread,
+  options: c.options ?? [],
+  needsTitle: c.needsTitle,
+  notice: c.notice,
+  noticeWhen: c.noticeWhen,
+});
 
 /** Why a network has no numbers to read. Every connector without `metrics` gives its own reason; this is the fallback. */
 export const noMetrics = (c: Connector): string => c.noMetrics ?? `${c.name} reports no numbers for a post.`;
@@ -68,7 +78,13 @@ export function describe(c: Connector) {
     fields: c.fields
       .filter((f) => !f.hidden)
       .map((f) => (spec && (f.key === spec.client.id || f.key === spec.client.secret) ? { ...f, optional: f.key === spec.client.secret && Boolean(spec.client.secretOptional) } : f)),
+    // The settings a target may carry in `options`, by key. A select's first choice is what applies when the key is left out.
     options: c.options ?? [],
+    // The destination's word for the title a post there must have, when it refuses a post without one. It is options.title, or the first line of the text.
+    needs_title: c.needsTitle ?? null,
+    // What publishing there does that cannot be taken back, and what that becomes while an option holds a value.
+    notice: c.notice ?? null,
+    notice_when: c.noticeWhen ?? [],
     limits: c.limits,
     // True when a post to this network may carry a thread (extra parts published as replies or comments).
     threads: Boolean(c.reply),

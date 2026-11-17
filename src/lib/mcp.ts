@@ -180,7 +180,9 @@ export function buildServer({ baseUrl, local, actor = localActor }: Options): Mc
     "list_platforms",
     {
       title: "List networks",
-      description: "Every network Broadside can post to, with its character limit, media rules, per-post options and what a user needs to connect it.",
+      description:
+        "Every network Broadside can post to, with its character limit, media rules, the options a target may carry and what a user needs to connect it. " +
+        "notice, where a network has one, says what publishing there does that cannot be taken back, and notice_when what that becomes while an option holds a value. Read it before posting there.",
       inputSchema: {},
       annotations: readOnly,
     },
@@ -351,7 +353,7 @@ export function buildServer({ baseUrl, local, actor = localActor }: Options): Mc
     {
       title: "Check a post without sending it",
       description:
-        "Reports, per account, whether this text, media and thread fit that network: the problems in plain words, the measured length against the limit, and the same for each thread part. Sends nothing.",
+        "Reports, per account, whether this text, media, thread and options fit that network: the problems in plain words, the measured length against the limit, and the same for each thread part. Sends nothing.",
       inputSchema: { content: postFields.content, targets: postFields.targets, group_id: postFields.group_id, media_ids: postFields.media_ids, thread: postFields.thread },
       annotations: readOnly,
     },

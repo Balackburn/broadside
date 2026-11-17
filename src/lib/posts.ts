@@ -5,7 +5,7 @@ import { groupTargets } from "./groups";
 import { getMedia, toItem, type Media } from "./media";
 import { guardedFetch } from "./net";
 import { listening, queueEvent, type EventName } from "./outgoing";
-import { connector, fits, measure, problems, threadProblems } from "./platforms";
+import { connector, fits, measure, optionProblems, problems, threadProblems } from "./platforms";
 import { PublishError, type PartRef } from "./platforms/types";
 import { EVERY, isTimeZone, nextOccurrence, type Every } from "./repeat";
 import { copyPostTags, parseTags, setPostTags, tagKey, tagsOf } from "./tags";
@@ -703,7 +703,11 @@ export function recoverInterrupted(): number {
   return failed;
 }
 
-/** A dry run: how the text, media and thread fit each chosen account. Sends and saves nothing. */
+/**
+ * A dry run: how the text, media, thread and options fit each chosen account.
+ * Sends and saves nothing. It also names what a connector would only find when
+ * the post goes out, such as an article with no title.
+ */
 export function inspectPost(input: { content?: string; targets?: TargetInput[]; group_id?: string | null; media_ids?: string[]; thread?: string[] }) {
   const media = (input.media_ids ?? []).map((id) => {
     const found = getMedia(id);
@@ -716,7 +720,7 @@ export function inspectPost(input: { content?: string; targets?: TargetInput[]; 
     const c = account && connector(account.platform);
     if (!account || !c) return { account_id: target.account_id, ok: false, problems: ["No connected account has this id."] };
     const text = target.content_override ?? input.content ?? "";
-    const found = [...problems(c, text, media), ...threadProblems(fits(c), thread)];
+    const found = [...problems(c, text, media), ...threadProblems(fits(c), thread), ...optionProblems(c, text, target.options)];
     const replyMax = c.limits.maxReplyChars ?? c.limits.maxChars;
     return {
       account_id: account.id,
