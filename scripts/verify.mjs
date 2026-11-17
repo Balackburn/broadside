@@ -1614,7 +1614,12 @@ try {
   standinFeed.version++;
   const beforeDue = (await via("GET", `/feeds/${feedId}`)).body.data;
   await sleep(1500);
-  ok(Date.parse(beforeDue.next_check_at) - Date.now() > 13 * 60000 && (await feedPosts(feedId)).length === 2, "A feed just checked is left alone by the scheduler: its next check is about fifteen minutes away");
+  const postsBeforeDue = (await feedPosts(feedId)).length;
+  ok(
+    Date.parse(beforeDue.next_check_at) - Date.now() > 13 * 60000 && postsBeforeDue === 2,
+    "A feed just checked is left alone by the scheduler: its next check is about fifteen minutes away",
+    JSON.stringify({ next_check_at: beforeDue.next_check_at, now: new Date().toISOString(), last_checked_at: beforeDue.last_checked_at, posts: postsBeforeDue }),
+  );
   const direct = new DatabaseSync(path.join(dataDir, "broadside.db"));
   direct.exec("PRAGMA busy_timeout = 5000");
   direct.prepare("UPDATE feeds SET next_check_at = ? WHERE id = ?").run(new Date(Date.now() - 1000).toISOString(), feedId);
@@ -1720,6 +1725,8 @@ try {
   // WordPress, Ghost, Listmonk, Tumblr, Twitch and Kick, each against a stand-in that answers as its documentation says.
   const sixBefore = (await via("GET", "/accounts")).body.data.length;
   const six = {};
+  // A draft with options for WordPress and Listmonk, read again later by a viewer once there is a team.
+  let optionsPost;
   const tryConnect = (platform, credentials) => api("/api/v1/accounts", { method: "POST", headers: auth, body: JSON.stringify({ platform, credentials }) });
   const sendTo = (accountId, content, extra = {}, options) => via("POST", "/posts", { content, targets: [{ account_id: accountId, ...(options ? { options } : {}) }], ...extra });
   const only = (reply) => reply.body.data?.targets?.[0] ?? {};
@@ -1833,6 +1840,53 @@ try {
     "Listmonk: a campaign's views and clicks are read back, without its body",
     JSON.stringify(on(lmNumbers, "listmonk")),
   );
+
+  // Per-network options: described to the browser and to agents, checked before sending, kept on a draft, shown in the composer, sent on publish
+  {
+    const described = (await via("GET", "/platforms")).body.data;
+    const lmSpec = described.find((p) => p.id === "listmonk");
+    const wpSpec = described.find((p) => p.id === "wordpress");
+    ok(
+      /emails every subscriber/.test(lmSpec.notice ?? "") && lmSpec.notice_when.some((w) => w.option === "status" && w.is === "draft" && /nothing is sent/.test(w.notice)) && lmSpec.needs_title === "subject" && wpSpec.needs_title === "title" && wpSpec.options.map((o) => o.key).join() === "title,status" && wpSpec.notice === null,
+      "The networks' descriptions carry each one's options, the word for a title it must have, and Listmonk's notice that a post emails its lists unless Campaign is draft",
+    );
+    const untitledCheck = (await via("POST", "/check", { content: "", targets: [{ account_id: six.wordpress }, { account_id: six.listmonk, options: { title: "A subject given here" } }] })).body.data;
+    ok(
+      untitledCheck[0].ok === false && untitledCheck[0].problems.includes("WordPress needs a title. Write it as the first line of the post, or set the Title option for this account.") && untitledCheck[1].problems.every((p) => !/subject/.test(p)),
+      "The dry run names a missing title in the words publishing would fail with, and a Subject option counts as one",
+      JSON.stringify(untitledCheck),
+    );
+    const wpOptions = { title: "A title kept on the draft", status: "draft" };
+    optionsPost = await via("POST", "/posts", { content: "The body of a draft with options", draft: true, targets: [{ account_id: six.wordpress, options: wpOptions }, { account_id: six.listmonk, options: { status: "draft" } }] });
+    const kept = (post) => same(post.targets.find((t) => t.account_id === six.wordpress)?.options, wpOptions) && same(post.targets.find((t) => t.account_id === six.listmonk)?.options, { status: "draft" });
+    const reread = (await via("GET", `/posts/${optionsPost.body.data.id}`)).body.data;
+    const changed = (await via("PATCH", `/posts/${optionsPost.body.data.id}`, { content: "The body, changed" })).body.data;
+    ok(optionsPost.body.data.status === "draft" && kept(reread) && changed.content === "The body, changed" && kept(changed), "A draft keeps each account's options, and an edit that names no accounts leaves them as they were");
+    // Every notice a network has travels in the page's data for the composer, so only the rendered notice element says which one is shown.
+    const shownNotice = (html) => html.match(/role="status"[^>]*>[\s\S]{0,600}?<span class="min-w-0">([^<]*)<\/span>/)?.[1] ?? "";
+    const composer = await page(`/app?edit=${optionsPost.body.data.id}`);
+    ok(
+      composer.includes("Edit post") && composer.includes("Title: A title kept on the draft, Publish as: draft") && composer.includes("Campaign: draft") && shownNotice(composer).startsWith("Campaign is set to draft. The campaign is made in Listmonk and nothing is sent"),
+      "The composer opens the draft with each account's options summed up, and Listmonk's notice says nothing is sent while Campaign is draft",
+      shownNotice(composer),
+    );
+    const sendingDraft = await via("POST", "/posts", { content: "A newsletter that would go out", draft: true, targets: [{ account_id: six.listmonk }] });
+    const sendingComposer = await page(`/app?edit=${sendingDraft.body.data.id}`);
+    ok(
+      shownNotice(sendingComposer).startsWith("Publishing emails every subscriber of the chosen lists at once, and an email cannot be unsent") && sendingComposer.includes("Defaults"),
+      "With Campaign left at its default, the composer warns that publishing emails every subscriber and cannot be unsent",
+      shownNotice(sendingComposer),
+    );
+    await via("DELETE", `/posts/${sendingDraft.body.data.id}`);
+    const before = { wp: more.wordpress.posts.length, campaigns: more.listmonk.campaigns.length, started: more.listmonk.started.length };
+    const published = await via("POST", `/posts/${optionsPost.body.data.id}/publish`);
+    const article = more.wordpress.posts.at(-1);
+    ok(
+      published.status === 200 && more.wordpress.posts.length === before.wp + 1 && article.title === "A title kept on the draft" && article.status === "draft" && article.content === "<p>The body, changed</p>" && more.listmonk.campaigns.length === before.campaigns + 1 && more.listmonk.started.length === before.started,
+      "Publishing the draft sends WordPress the Title and Publish as options, and makes the Listmonk campaign without starting it",
+      JSON.stringify({ article, started: more.listmonk.started.length - before.started }),
+    );
+  }
 
   // Tumblr: sign in, choose a blog, post blocks with the file in the same request
   const tmIn = await signIn("tumblr");
@@ -2207,6 +2261,8 @@ try {
     const editorPosts = await team(`/app/posts?post=${asEditor.write.body.data.id}`, { cookie: people.Eddie.cookie });
     ok(viewerCompose.text.includes("You have the viewer role, which reads posts and does not write them") && viewerConnect.text.includes("they are made by an admin") && !viewerConnect.text.includes("read only agent") && !viewerConnect.text.includes('href="/app/connect"'), "A viewer's Compose and Connect screens say what the role cannot do, show no keys, and the rail leaves Connect out");
     ok(viewerPosts.text.includes("By Eddie") && viewerPosts.text.includes("Written by Eddie.") && !viewerPosts.text.includes("Publish now") && !viewerPosts.text.includes("Remove from history") && editorPosts.text.includes("Publish now") && editorPosts.text.includes("Remove from history"), "Posts show who wrote each one; a viewer gets no buttons on a post, and an editor gets them");
+    const viewerOptions = await team(`/app/posts?post=${optionsPost.body.data.id}`, { cookie: people.Vic.cookie });
+    ok(viewerOptions.text.includes("Options for ") && viewerOptions.text.includes("A title kept on the draft") && viewerOptions.text.includes("Publish as") && !viewerOptions.text.includes("Remove from history"), "A viewer sees what options a post was sent with, read-only");
     const viewerAccounts = await team("/app/accounts", { cookie: people.Vic.cookie });
     const viewerAutomations = await team("/app/automations", { cookie: people.Vic.cookie });
     const viewerTeam = await team("/app/team", { cookie: people.Vic.cookie });
