@@ -4,13 +4,15 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import type { TargetNumbers } from "@/lib/analytics";
+import { optionsSet } from "@/lib/platforms/options";
+import type { OptionSpec } from "@/lib/platforms/types";
 import { tagKey } from "@/lib/tag-rules";
 import { Counts, Standing } from "./numbers";
 import { TagFilter, TagList, TagManager, type TagInfo } from "./tags";
 import { api, Icon, Stamp, Status, Tabs, Time, useToast } from "./ui";
 
 type Part = { part: number; status: string; url: string | null };
-type Target = { id: string; platform: string; handle: string; status: string; error: string | null; url: string | null; content_override: string | null; parts: Part[] };
+type Target = { id: string; platform: string; handle: string; status: string; error: string | null; url: string | null; content_override: string | null; options: Record<string, unknown>; parts: Part[] };
 type Post = {
   id: string;
   content: string;
@@ -47,6 +49,7 @@ const matches = (post: Post, filter: Filter) =>
  * `numbers` holds what Broadside has read back for each published target, by target id. A target that has not gone out has no entry.
  * `feed` is set when the list was asked for one feed's posts only; its title is another site's text and is shown as text.
  * `canWrite` is false for a viewer, who reads the list and gets none of its buttons. `authors` is true when the install has a team, and each post then says who wrote it.
+ * `networks` holds the options each network declares, by network id, so a target can say what was set for it. The values are what someone typed, and are shown as text.
  */
 export function PostsList({
   posts,
@@ -56,6 +59,7 @@ export function PostsList({
   feed,
   canWrite = true,
   authors = false,
+  networks = {},
 }: {
   posts: Post[];
   tags: TagInfo[];
@@ -64,6 +68,7 @@ export function PostsList({
   feed?: { id: string; title: string | null };
   canWrite?: boolean;
   authors?: boolean;
+  networks?: Record<string, { options: OptionSpec[] }>;
 }) {
   const router = useRouter();
   const { show, toast } = useToast();
@@ -261,6 +266,7 @@ export function PostsList({
                               ))}
                             </ol>
                           ) : null}
+                          <OptionsSet specs={networks[t.platform]?.options ?? []} values={t.options} handle={t.handle} />
                           {t.error ? <p className="mt-2 text-sm text-bad">{t.error}</p> : null}
                           {numbers[t.id] ? (
                             <div className="mt-2 space-y-1">
@@ -360,5 +366,21 @@ export function PostsList({
       <TagManager open={managing} onClose={() => setManaging(false)} tags={tags} />
       {toast}
     </div>
+  );
+}
+
+/** What was set for one account beyond its network's defaults, under each option's own label. An option the network no longer declares is left out. Read-only. */
+function OptionsSet({ specs, values, handle }: { specs: OptionSpec[]; values: unknown; handle: string }) {
+  const set = optionsSet(specs, values);
+  if (!set.length) return null;
+  return (
+    <dl className="note mt-2 flex flex-wrap gap-x-4 gap-y-1" aria-label={`Options for ${handle}`}>
+      {set.map((option) => (
+        <div key={option.key} className="flex min-w-0 gap-1.5">
+          <dt className="flex-none text-ink-3">{option.label}</dt>
+          <dd className="min-w-0 break-words text-ink">{option.value}</dd>
+        </div>
+      ))}
+    </dl>
   );
 }

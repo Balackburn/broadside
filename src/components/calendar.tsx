@@ -6,7 +6,8 @@ import { tagKey } from "@/lib/tag-rules";
 import { TagFilter, TagList } from "./tags";
 import { Stamp, Status, useHydrated } from "./ui";
 
-type Entry = { id: string; content: string; status: string; at: string; platforms: string[]; tags: string[] };
+/** `options` says what was set for an account beyond its network's defaults. It is text someone typed, and is shown as text. */
+type Entry = { id: string; content: string; status: string; at: string; platforms: string[]; options: { handle: string; set: string }[]; tags: string[] };
 
 const dayKey = (d: Date) => `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
 const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
@@ -152,6 +153,12 @@ function Month({ posts: every }: { posts: Entry[] }) {
                         <Stamp key={`${p}-${i}`} platform={p} />
                       ))}
                     </span>
+                    {post.options.map((o, i) => (
+                      <span key={i} className="note mt-2 block break-words">
+                        <span className="font-medium text-ink">{o.handle}</span>
+                        {` ${o.set}`}
+                      </span>
+                    ))}
                   </Link>
                 </li>
               ))}

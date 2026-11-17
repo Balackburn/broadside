@@ -4,14 +4,32 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useMemo, useRef, useState } from "react";
 import { measure, problems, threadProblems } from "@/lib/platforms/measure";
-import type { Limits } from "@/lib/platforms/types";
+import { noticeFor, optionProblems, optionSummary, optionsToSend, valuesOf, type OptionValues } from "@/lib/platforms/options";
+import type { Limits, NoticeWhen, OptionSpec } from "@/lib/platforms/types";
 import { appendSignature, endsWithSignature } from "@/lib/sign";
 import { MediaPicker } from "./media-library";
 import { addTag, TagPicker } from "./tags";
 import { api, Icon, Stamp, Status, Tabs, useHydrated, useToast, when } from "./ui";
 
-/** `threads` says whether the network can take parts after the main post; `noThread` is its own reason when it cannot. */
-export type ComposerAccount = { id: string; platform: string; name: string; handle: string; limits: Limits; threads: boolean; noThread?: string; signature_id?: string | null };
+/**
+ * `threads` says whether the network can take parts after the main post; `noThread` is its own reason when it cannot.
+ * `options` are the settings its network takes for one post, `needsTitle` its word for a title it must have, and
+ * `notice` what publishing there does that cannot be taken back, with what that becomes while an option holds a value.
+ */
+export type ComposerAccount = {
+  id: string;
+  platform: string;
+  name: string;
+  handle: string;
+  limits: Limits;
+  threads: boolean;
+  noThread?: string;
+  signature_id?: string | null;
+  options: OptionSpec[];
+  needsTitle?: string;
+  notice?: string;
+  noticeWhen?: NoticeWhen[];
+};
 /** A named set of accounts: picking it selects exactly these. */
 export type ComposerGroup = { id: string; name: string; account_ids: string[] };
 /** Saved text that Add signature puts at the end of the post. */
@@ -37,7 +55,7 @@ export type ComposerInitial = {
   content: string;
   publish_at: string | null;
   draft: boolean;
-  targets: { account_id: string; content_override: string | null }[];
+  targets: { account_id: string; content_override: string | null; options: OptionValues }[];
   media: Media[];
   thread: string[];
   tags: string[];
@@ -69,6 +87,9 @@ export function Composer({
   const [overrides, setOverrides] = useState<Record<string, string>>(() =>
     Object.fromEntries((initial?.targets ?? []).flatMap((t) => (t.content_override === null ? [] : [[t.account_id, t.content_override]]))),
   );
+  // What each account's network was told for this post, by account. An account with nothing here goes out with its network's defaults.
+  const [options, setOptions] = useState<Record<string, OptionValues>>(() => Object.fromEntries((initial?.targets ?? []).flatMap((t) => (Object.keys(valuesOf(t.options)).length ? [[t.account_id, valuesOf(t.options)]] : []))));
+  const [openOptions, setOpenOptions] = useState<string[]>([]);
   const [media, setMedia] = useState<Media[]>(initial?.media ?? []);
   const [mode, setMode] = useState<Mode>(initial ? (initial.draft ? "draft" : initial.publish_at ? "later" : "now") : "now");
   const [at, setAt] = useState(() => localInput(initial?.publish_at ? new Date(initial.publish_at) : new Date(Date.now() + 3600_000)));
@@ -94,12 +115,31 @@ export function Composer({
   const parts = useMemo(() => thread.map((part) => part.text), [thread]);
   const pristine = !text.trim() && media.length === 0 && Object.keys(overrides).length === 0 && parts.every((part) => !part.trim());
   const issues = useMemo(
-    () => Object.fromEntries(chosen.map((a) => [a.id, mode === "draft" || pristine ? [] : [...problems(a, overrides[a.id] ?? text, shapes), ...threadProblems(a, parts, true)]])),
-    [chosen, overrides, text, shapes, mode, pristine, parts],
+    () =>
+      Object.fromEntries(
+        chosen.map((a) => [a.id, mode === "draft" || pristine ? [] : [...problems(a, overrides[a.id] ?? text, shapes), ...threadProblems(a, parts, true), ...optionProblems(a, overrides[a.id] ?? text, options[a.id])]]),
+      ),
+    [chosen, overrides, text, shapes, mode, pristine, parts, options],
   );
   const blocked = chosen.filter((a) => issues[a.id].length > 0);
 
-  const toggle = (id: string) => setSelected((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]));
+  /** Changes which accounts the post goes to. An account taken off the post loses its options, so adding it back starts from the defaults. */
+  const choose = (next: string[]) => {
+    setSelected(next);
+    setOptions((held) => Object.fromEntries(Object.entries(held).filter(([id]) => next.includes(id))));
+    setOpenOptions((open) => open.filter((id) => next.includes(id)));
+  };
+  const toggle = (id: string) => choose(selected.includes(id) ? selected.filter((x) => x !== id) : [...selected, id]);
+  /** Sets one option for one account. Emptying it removes it, which leaves the network's default in charge. */
+  const setOption = (id: string, key: string, value: string | boolean) =>
+    setOptions((held) => {
+      const next = { ...held[id] };
+      if (value === "" || value === false) delete next[key];
+      else next[key] = value;
+      return { ...held, [id]: next };
+    });
+  // The accounts with something to set, or with something to say before a post goes to them.
+  const configurable = chosen.filter((a) => a.options.length > 0 || a.notice);
 
   // A group names accounts that may since have been disconnected; only the ones still here count.
   const membersOf = (group: ComposerGroup) => group.account_ids.filter((id) => accounts.some((a) => a.id === id));
@@ -160,7 +200,7 @@ export function Composer({
         method: initial ? "PATCH" : "POST",
         body: JSON.stringify({
           content: text,
-          targets: chosen.map((a) => ({ account_id: a.id, content_override: overrides[a.id] ?? undefined })),
+          targets: chosen.map((a) => ({ account_id: a.id, content_override: overrides[a.id] ?? undefined, options: optionsToSend(a.options, options[a.id]) })),
           thread: parts,
           media_ids: media.map((m) => m.id),
           tags: tagged.tags,
@@ -185,6 +225,8 @@ export function Composer({
     setResult(null);
     setText("");
     setOverrides({});
+    setOptions({});
+    setOpenOptions([]);
     setMedia([]);
     setThread([]);
     setTags([]);
@@ -275,7 +317,7 @@ export function Composer({
                     aria-pressed={isPicked(group)}
                     disabled={members.length === 0}
                     title={members.length === 0 ? "This group has no accounts left." : `Select exactly ${members.length === 1 ? "its 1 account" : `its ${members.length} accounts`}`}
-                    onClick={() => setSelected(members)}
+                    onClick={() => choose(members)}
                   >
                     <span className="max-w-44 truncate">{group.name}</span>
                     <span className="num opacity-70">{members.length}</span>
@@ -421,6 +463,25 @@ export function Composer({
           {thread.length === 0 ? <span className="note ml-3">Add a first comment or a full thread.</span> : null}
         </div>
 
+        {configurable.length ? (
+          <div className="mt-8">
+            <p className="label">Options</p>
+            <p className="note -mt-1 mb-3">What each account&rsquo;s network lets you set for this post. Anything left as it is uses that network&rsquo;s default.</p>
+            <ul className="space-y-2">
+              {configurable.map((a) => (
+                <AccountOptions
+                  key={a.id}
+                  account={a}
+                  values={options[a.id] ?? {}}
+                  open={openOptions.includes(a.id)}
+                  onToggle={() => setOpenOptions((open) => (open.includes(a.id) ? open.filter((id) => id !== a.id) : [...open, a.id]))}
+                  onChange={(key, value) => setOption(a.id, key, value)}
+                />
+              ))}
+            </ul>
+          </div>
+        ) : null}
+
         <div className="mt-8">
           <TagPicker value={tags} onChange={setTags} draft={tagDraft} onDraft={setTagDraft} known={knownTags} onProblem={show} />
         </div>
@@ -555,6 +616,113 @@ export function Composer({
       />
       {toast}
     </div>
+  );
+}
+
+/**
+ * One account's options for this post: a line saying what is set, which opens
+ * in place to the controls. The controls stay in the page while it is closed,
+ * hidden, so what was typed is kept. The network's notice sits under them
+ * whether the section is open or not, and follows the values as they change.
+ */
+function AccountOptions({
+  account,
+  values,
+  open,
+  onToggle,
+  onChange,
+}: {
+  account: ComposerAccount;
+  values: OptionValues;
+  open: boolean;
+  onToggle: () => void;
+  onChange: (key: string, value: string | boolean) => void;
+}) {
+  const summary = optionSummary(account.options, values);
+  const notice = noticeFor(account, values);
+  const panel = `options-${account.id}`;
+  return (
+    <li className="panel">
+      {account.options.length ? (
+        <button type="button" className="row flex w-full items-center gap-3 rounded-[inherit] p-3 text-left" aria-expanded={open} aria-controls={panel} onClick={onToggle}>
+          <Stamp platform={account.platform} />
+          <span className="min-w-0 flex-1">
+            <span className="block truncate font-medium">{account.handle}</span>
+            <span className="note block break-words">{summary || "Defaults"}</span>
+          </span>
+          <span className="note flex-none">{open ? "Close" : "Change"}</span>
+        </button>
+      ) : (
+        <div className="flex items-center gap-3 p-3">
+          <Stamp platform={account.platform} />
+          <span className="min-w-0 truncate font-medium">{account.handle}</span>
+        </div>
+      )}
+      {account.options.length ? (
+        <div id={panel} hidden={!open} className="grid gap-x-3 gap-y-4 px-3 pt-1 pb-3 sm:grid-cols-2">
+          {account.options.map((option) => {
+            const id = `${panel}-${option.key}`;
+            const help = option.help ? (
+              <p id={`${id}-help`} className="note mt-1.5">
+                {option.help}
+              </p>
+            ) : null;
+            const described = option.help ? `${id}-help` : undefined;
+            const held = values[option.key];
+            if (option.kind === "boolean") {
+              return (
+                <div key={option.key}>
+                  <label className="flex min-h-10 cursor-pointer items-center gap-2.5 text-sm font-[550]" htmlFor={id}>
+                    <input id={id} type="checkbox" className="size-[18px] flex-none accent-signal" checked={held === true} aria-describedby={described} onChange={(e) => onChange(option.key, e.target.checked)} />
+                    {option.label}
+                  </label>
+                  {help}
+                </div>
+              );
+            }
+            if (option.kind === "select") {
+              const [first, ...rest] = option.choices ?? [];
+              const current = typeof held === "string" && held !== first ? held : "";
+              return (
+                <div key={option.key}>
+                  <label className="label" htmlFor={id}>
+                    {option.label}
+                  </label>
+                  <select id={id} className="field" value={current} aria-describedby={described} onChange={(e) => onChange(option.key, e.target.value)}>
+                    <option value="">{`${first} (default)`}</option>
+                    {rest.map((choice) => (
+                      <option key={choice} value={choice}>
+                        {choice}
+                      </option>
+                    ))}
+                    {/* A value set through the API that the list does not offer is kept until it is changed here. */}
+                    {current && !rest.includes(current) ? <option value={current}>{current}</option> : null}
+                  </select>
+                  {help}
+                </div>
+              );
+            }
+            return (
+              <div key={option.key}>
+                <label className="label" htmlFor={id}>
+                  {option.label}
+                </label>
+                <input id={id} type="text" className="field" value={typeof held === "string" ? held : ""} aria-describedby={described} autoComplete="off" onChange={(e) => onChange(option.key, e.target.value)} />
+                {help}
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
+      {notice ? (
+        <p className="note flex gap-2 px-3 pb-3" role="status">
+          <span className="mt-0.5 flex-none">
+            <Icon name="alert" size={16} />
+          </span>
+          <span className="min-w-0">{notice}</span>
+        </p>
+      ) : null}
+    </li>
   );
 }
 

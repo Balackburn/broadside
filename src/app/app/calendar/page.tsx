@@ -1,5 +1,7 @@
 import type { Metadata } from "next";
 import { Calendar } from "@/components/calendar";
+import { connector } from "@/lib/platforms";
+import { optionSummary } from "@/lib/platforms/options";
 import { listPosts } from "@/lib/posts";
 import { viewer } from "@/lib/viewer";
 
@@ -15,6 +17,11 @@ export default async function CalendarPage() {
     status: p.status,
     at: p.publish_at ?? p.created_at,
     platforms: p.targets.map((t) => t.platform),
+    // What was set for an account beyond its network's defaults, as one line for each account that has any.
+    options: p.targets.flatMap((t) => {
+      const set = optionSummary(connector(t.platform)?.options ?? [], t.options);
+      return set ? [{ handle: t.handle, set }] : [];
+    }),
     tags: p.tags,
   }));
   return <Calendar posts={posts} />;

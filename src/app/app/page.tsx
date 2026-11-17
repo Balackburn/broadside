@@ -32,7 +32,7 @@ export default async function ComposePage({ searchParams }: PageProps<"/app">) {
           content: post.content,
           publish_at: post.publish_at,
           draft: post.status === "draft",
-          targets: post.targets.map((t) => ({ account_id: t.account_id, content_override: t.content_override })),
+          targets: post.targets.map((t) => ({ account_id: t.account_id, content_override: t.content_override, options: t.options })),
           media: post.media.map((m) => ({ id: m.id, type: m.type, url: m.url, public_url: m.public_url, filename: m.filename, alt: m.alt })),
           thread: post.thread,
           tags: post.tags,
